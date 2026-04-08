@@ -133,8 +133,8 @@
  *   - getSubscriptions(account)
  *
  * broadcast (BroadcastAPI):
- *   - updateAccount2(params)
- *   - updateProfile(account, profileObject)
+ *   - updateAccount2(params) — params.externalKey bypasses keyManager
+ *   - updateProfile(account, profileObject, externalKey?)
  *   - vote(voter, author, permlink, weight)
  *   - comment(params)
  *   - commentOptions(params)
@@ -1435,14 +1435,12 @@ export class PixaProxyAPI {
                     const tuned = await this.vault.autoTuneParams(2000);
                     if (this.settingsDb) {
                         try {
-                            try { await this.settingsDb.createCollection('pq_vault_config'); } catch (_) {}
                             const configCol = await this.settingsDb.getCollection('pq_vault_config');
                             const record = {
                                 memoryKib: tuned.memoryKib, iterations: tuned.iterations,
                                 label: tuned.label, measuredMs: tuned.measuredMs, tunedAt: Date.now(),
                             };
-                            try { await configCol.add(record, { id: 'autotune_params' }); }
-                            catch (_) { await configCol.update('autotune_params', record); }
+                            await configCol.upsert('autotune_params', record);
                         } catch (e) {
                             console.warn('[Vault] Failed to persist auto-tune:', e.message);
                         }
@@ -2871,7 +2869,6 @@ class AccountsAPI {
     async _notifReadsCollection() {
         if (!this._notifCol) {
             const db = this.proxy.settingsDb;
-            try { await db.createCollection('notification_reads'); } catch (_) {}
             this._notifCol = await db.getCollection('notification_reads');
         }
         return this._notifCol;
@@ -2902,8 +2899,7 @@ class AccountsAPI {
      * Merges with any previously-read IDs. Keeps only the most recent 500
      * IDs to prevent unbounded growth.
      *
-     * Uses the standard LacertaDB add/update upsert pattern:
-     *   try { col.add(doc, { id }) } catch { col.update(id, doc) }
+     * Uses LacertaDB's native upsert() for atomic insert-or-update.
      *
      * @param {string} account
      * @param {number[]} notificationIds
@@ -2937,12 +2933,7 @@ class AccountsAPI {
 
             const doc = { ids, updated_at: Date.now() };
 
-            // Standard LacertaDB upsert: add (insert) → catch → update
-            try {
-                await col.add(doc, { id: docId });
-            } catch (_) {
-                await col.update(docId, doc);
-            }
+            await col.upsert(docId, doc);
         } catch (e) {
             console.warn('[AccountsAPI] markNotificationsRead failed:', e.message);
         }
@@ -3710,7 +3701,7 @@ class BroadcastAPI {
             params = { account: paramsOrAccount, jsonMetadata, postingJsonMetadata, extensions };
         }
 
-        const { account, auth = {} } = params;
+        const { account, auth = {}, externalKey } = params;
         const normalizedAccount = normalizeAccount(account);
 
         if (!normalizedAccount) {
@@ -3724,7 +3715,15 @@ class BroadcastAPI {
         // all other authority changes require the active key.
         const requiresOwner = !!auth.owner;
         const keyType = requiresOwner ? 'owner' : requiresActive ? 'active' : 'posting';
-        const key = await this.proxy.keyManager.requestKey(normalizedAccount, keyType);
+
+        // When externalKey is provided, bypass keyManager entirely (used for
+        // operations on accounts the logged-in user doesn't own, e.g. portal accounts).
+        let key;
+        if (externalKey) {
+            key = externalKey;
+        } else {
+            key = await this.proxy.keyManager.requestKey(normalizedAccount, keyType);
+        }
 
         const ensureString = (val) => {
             if (val === null || val === undefined) return "";
@@ -3749,7 +3748,7 @@ class BroadcastAPI {
             { account: normalizedAccount, keyType });
     }
 
-    async updateProfile(account, profileObject) {
+    async updateProfile(account, profileObject, externalKey) {
         const normalizedAccount = normalizeAccount(account);
 
         if (!normalizedAccount) {
@@ -3776,7 +3775,8 @@ class BroadcastAPI {
         const result = await this.updateAccount2({
             account: normalizedAccount,
             jsonMetadata: accountData.json_metadata,
-            postingJsonMetadata: newPostingMeta
+            postingJsonMetadata: newPostingMeta,
+            externalKey: externalKey || undefined,
         });
 
         // Invalidate stale cached account so next getAccounts() fetches fresh data
@@ -5559,7 +5559,7 @@ class CommunitiesAPI {
         try {
             const params = { name };
             if (observer) params.observer = observer;
-            return await this.proxy.client.call('bridge', 'get_community', params);
+            return await this.proxy.client.pixamind.getCommunity(params);
         } catch (e) {
             console.warn('[CommunitiesAPI] getCommunity failed:', e.message);
         }
@@ -5578,7 +5578,7 @@ class CommunitiesAPI {
             if (options.query)    params.query    = options.query;
             if (options.sort)     params.sort     = options.sort;
             if (options.observer) params.observer = options.observer;
-            return await this.proxy.client.call('bridge', 'list_communities', params);
+            return await this.proxy.client.pixamind.listCommunities(params);
         } catch (e) {
             console.warn('[CommunitiesAPI] listCommunities failed:', e.message);
         }
@@ -6325,8 +6325,7 @@ class CacheManager {
         try {
             const collection = await this.getCollection(collectionName);
             const doc = { data, timestamp: Date.now() };
-            try { await collection.add(doc, { id: key }); }
-            catch (e) { await collection.update(key, doc); }
+            await collection.upsert(key, doc);
         } catch (e) {}
     }
 
@@ -6340,12 +6339,7 @@ class CacheManager {
     async invalidateAll(collectionName) {
         try {
             const collection = await this.getCollection(collectionName);
-            const docs = await collection.getAll();
-            if (docs.length === 0) return;
-            const ids = docs.map(doc => doc._id || doc.id).filter(Boolean);
-            if (ids.length > 0) {
-                await collection.batchDelete(ids);
-            }
+            await collection.clear({ force: true });
         } catch (e) {}
     }
 }
@@ -6783,7 +6777,6 @@ class EntityStoreManager {
     async _store(type) {
         const name = `${type}_store`;
         if (!this.stores.has(name)) {
-            try { await this.db.createCollection(name); } catch (e) {}
             this.stores.set(name, await this.db.getCollection(name));
         }
         return this.stores.get(name);
@@ -6827,12 +6820,7 @@ class EntityStoreManager {
         }
         try {
             const store = await this._store(type);
-            const id = sanitizedEntity._entity_id;
-            try {
-                await store.add(sanitizedEntity, { id });
-            } catch (e) {
-                await store.update(id, sanitizedEntity);
-            }
+            await store.upsert(sanitizedEntity._entity_id, sanitizedEntity);
         } catch (e) {
             console.warn(`[EntityStoreManager] upsert(${type}) error:`, e.message);
         }
@@ -6917,18 +6905,15 @@ class EntityStoreManager {
     }
 
     /**
-     * Invalidate all entities in a store using batchDelete (single IDB transaction).
+     * Invalidate all entities in a store.
+     * Uses collection.clear() for a single IDB store.clear() operation
+     * instead of loading all docs into memory just to delete them.
      * @param {'accounts'|'posts'|'comments'} type
      */
     async invalidateAll(type) {
         try {
             const store = await this._store(type);
-            const docs = await store.getAll();
-            if (docs.length === 0) return;
-            const ids = docs.map(doc => doc._id || doc.id || doc._entity_id).filter(Boolean);
-            if (ids.length > 0) {
-                await store.batchDelete(ids);
-            }
+            await store.clear({ force: true });
         } catch (e) {}
     }
 }
@@ -6953,7 +6938,6 @@ class QueryCacheManager {
     /** @returns {Promise<object>} LacertaDB collection */
     async _col() {
         if (!this._collection) {
-            try { await this.db.createCollection('query_cache'); } catch (e) {}
             this._collection = await this.db.getCollection('query_cache');
         }
         return this._collection;
@@ -7010,8 +6994,7 @@ class QueryCacheManager {
         try {
             const col = await this._col();
             const doc = { ids, entity_type: entityType, timestamp: Date.now() };
-            try { await col.add(doc, { id: queryKey }); }
-            catch (e) { await col.update(queryKey, doc); }
+            await col.upsert(queryKey, doc);
         } catch (e) {
             console.warn('[QueryCacheManager] store error:', e.message);
         }
@@ -7500,17 +7483,11 @@ class KeyManager {
             if (this._settingsDb) {
                 try {
                     const sealedCol = await this._settingsDb.getCollection('sealed_keys');
-                    const allDocs = await sealedCol.getAll();
-                    for (const doc of allDocs) {
-                        try { await sealedCol.delete(doc._id || doc.id || doc.account); } catch (_) {}
-                    }
+                    await sealedCol.clear({ force: true });
                 } catch (_) { /* collection may not exist in v6 */ }
                 try {
                     const sessCol = await this._settingsDb.getCollection('sessions');
-                    const allSess = await sessCol.getAll();
-                    for (const doc of allSess) {
-                        try { await sessCol.delete(doc._id || doc.id || doc.account); } catch (_) {}
-                    }
+                    await sessCol.clear({ force: true });
                 } catch (_) {}
             }
 
@@ -7538,8 +7515,7 @@ class KeyManager {
 
             // Persist
             if (this._pinLockoutStore) {
-                try { await this._pinLockoutStore.add(state, { id: 'state' }); }
-                catch (_) { try { await this._pinLockoutStore.update('state', state); } catch (_2) {} }
+                try { await this._pinLockoutStore.upsert('state', state); } catch (_) {}
             }
 
             return { locked: true, remainingSec: Math.ceil(lockoutMs / 1000), wiped: false };
@@ -7547,8 +7523,7 @@ class KeyManager {
 
         // Persist updated counter
         if (this._pinLockoutStore) {
-            try { await this._pinLockoutStore.add(state, { id: 'state' }); }
-            catch (_) { try { await this._pinLockoutStore.update('state', state); } catch (_2) {} }
+            try { await this._pinLockoutStore.upsert('state', state); } catch (_) {}
         }
 
         return { locked: false, remainingSec: 0, wiped: false };
@@ -7713,22 +7688,20 @@ class KeyManager {
 
     async setDependencies(settingsDb) {
         this._settingsDb = settingsDb;
-        try { await settingsDb.createCollection('unencrypted_keys'); } catch(e) {}
-        try { this.unencrypted = await settingsDb.getCollection('unencrypted_keys'); } catch(e) {}
+        // ensureCollection() is synchronous — registers the handle without IDB overhead.
+        // The collection lazy-inits on first actual get/add/update operation.
+        this.unencrypted = settingsDb.ensureCollection('unencrypted_keys');
 
         // SECURITY (v4.3 — H3): Persistent PIN lockout storage.
         // Survives page reload so attackers cannot reset the counter.
-        try { await settingsDb.createCollection('pin_lockout'); } catch(e) {}
-        try { this._pinLockoutStore = await settingsDb.getCollection('pin_lockout'); } catch(e) {}
+        this._pinLockoutStore = settingsDb.ensureCollection('pin_lockout');
     }
 
     async setVault(vaultDb) {
         this.vaultDbReference = vaultDb;
         if (vaultDb) {
-            try { await vaultDb.createCollection('master_keys'); } catch(e){}
-            try { await vaultDb.createCollection('individual_keys'); } catch(e){}
-            this.vaultMaster = await vaultDb.getCollection('master_keys');
-            this.vaultIndividual = await vaultDb.getCollection('individual_keys');
+            this.vaultMaster = vaultDb.ensureCollection('master_keys');
+            this.vaultIndividual = vaultDb.ensureCollection('individual_keys');
         }
     }
 
@@ -7738,10 +7711,8 @@ class KeyManager {
                 await this._generateSessionCryptoKey();
             }
             this.resetPinTimer();
-            try { await this.vaultDbReference.createCollection('master_keys'); } catch(e){}
-            try { await this.vaultDbReference.createCollection('individual_keys'); } catch(e){}
-            this.vaultMaster = await this.vaultDbReference.getCollection('master_keys');
-            this.vaultIndividual = await this.vaultDbReference.getCollection('individual_keys');
+            // Reuse setVault to avoid duplicating collection creation logic
+            await this.setVault(this.vaultDbReference);
             return true;
         } catch (e) {
             this.pinVerified = false;
@@ -8164,7 +8135,7 @@ class KeyManager {
                             { id: normalizedAccount }
                         );
                         console.info('[KeyManager] Migrated master keys from unencrypted → vault');
-                    } catch (_) { /* already in vault */ }
+                    } catch (_) { /* already in vault — skip (add-only to avoid TurboSerial errors on encrypted update) */ }
                 }
             }
         } catch(e) {}
@@ -8189,7 +8160,7 @@ class KeyManager {
                                 { id }
                             );
                             console.info(`[KeyManager] Migrated ${type} key from unencrypted → vault`);
-                        } catch (_) { /* already in vault */ }
+                        } catch (_) { /* already in vault — skip (add-only to avoid TurboSerial errors on encrypted update) */ }
                     }
                 }
             } catch(e) {}
@@ -8219,12 +8190,7 @@ class KeyManager {
 
         if (clearStorage && this.unencrypted) {
             try {
-                const allDocs = await this.unencrypted.getAll();
-                if (allDocs && allDocs.length) {
-                    for (const doc of allDocs) {
-                        try { await this.unencrypted.delete(doc._id || doc.id || doc.account); } catch (e) {}
-                    }
-                }
+                await this.unencrypted.clear({ force: true });
             } catch (e) {}
         }
     }
