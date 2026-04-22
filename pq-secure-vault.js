@@ -45,10 +45,10 @@ export const DEFAULT_PARALLELISM = 3;
 
 /** Low-memory profile: 19 MiB, 3 iterations (still meets OWASP minimum) */
 export const LOW_MEMORY_KIB = 19456;
-export const LOW_MEMORY_ITERATIONS = 3;
+export const LOW_MEMORY_ITERATIONS = 2;
 
 /** Vault format version — bump on any ciphertext format change */
-export const VAULT_VERSION = 3;
+export const VAULT_VERSION = 4;
 
 /** HKDF purpose strings for domain separation */
 const PURPOSE_ENCRYPT = 'pixa-vault-encrypt-v1';
@@ -747,16 +747,17 @@ export class SecureVault {
      * @param {number} [targetMs=2500] — Target wall-clock time for one derivation
      * @returns {Promise<{ memoryKib, iterations, label, measuredMs }>}
      */
-    async autoTuneParams(targetMs = 2000) {
+    async autoTuneParams(targetMs = 1000) {
         // FIX (v4.4 — P2): Each profile now includes parallelism so that
         // the benchmark actually tests the same parameters that will be used
         // for sealing. Also persists parallelism via this.parallelism.
         const p = this.parallelism;
+        const i = this.iterations;
         const profiles = [
-            { memoryKib: 131072, iterations: 3, parallelism: p, label: 'ultra' },    // 128 MiB — modern desktop
-            { memoryKib: 65536,  iterations: 3, parallelism: p, label: 'high' },     //  64 MiB — high-end mobile / modest desktop
-            { memoryKib: 32768,  iterations: 3, parallelism: p, label: 'standard' }, //  32 MiB — mid-range mobile
-            { memoryKib: 19456,  iterations: 3, parallelism: p, label: 'low' },      //  19 MiB — OWASP minimum, extra t compensates
+            { memoryKib: 131072, iterations: i, parallelism: p, label: 'ultra' },    // 128 MiB — modern desktop
+            { memoryKib: 65536,  iterations: i, parallelism: p, label: 'high' },     //  64 MiB — high-end mobile / modest desktop
+            { memoryKib: 32768,  iterations: i, parallelism: p, label: 'standard' }, //  32 MiB — mid-range mobile
+            { memoryKib: 19456,  iterations: i, parallelism: p, label: 'low' },      //  19 MiB — OWASP minimum, extra t compensates
         ];
 
         const testSalt = randomBytes(16);

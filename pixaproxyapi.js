@@ -1,7 +1,7 @@
 /**
  * Pixa Blockchain Proxy API System with LacertaDB
  * Complete API wrapper with organized method groups
- * @version 4.2.0
+ * @version 4.3.0
  *
  * API Groups and Methods:
  *
@@ -31,6 +31,38 @@
  * database (DatabaseAPI):
  *   - call(method, params)
  *   - getDatabaseInfo()
+ *   — find_* family (AppBase database_api.find_*) —
+ *   - findAccounts(accounts, delayedVotesActive)
+ *   - findComments(commentsTuples)
+ *   - findVotes(author, permlink)
+ *   - findChangeRecoveryAccountRequests(accounts)
+ *   - findCollateralizedConversionRequests(account)
+ *   - findDeclineVotingRightsRequests(accounts)
+ *   - findEscrows(from)
+ *   - findHbdConversionRequests(account)
+ *   - findLimitOrders(account)
+ *   - findOwnerHistories(owner)
+ *   - findSavingsWithdrawals(account)
+ *   - findVestingDelegationExpirations(account)
+ *   - findVestingDelegations(account)
+ *   - findWithdrawVestingRoutes(account, order)
+ *   — list_* family (AppBase database_api.list_*) —
+ *   - listAccounts({start, limit, order})
+ *   - listChangeRecoveryAccountRequests({start, limit, order})
+ *   - listComments({start, limit, order})
+ *   - listDeclineVotingRightsRequests({start, limit, order})
+ *   - listEscrows({start, limit, order})
+ *   - listHbdConversionRequests({start, limit, order})
+ *   - listLimitOrders({start, limit, order})
+ *   - listOwnerHistories({start, limit})
+ *   - listSavingsWithdrawals({start, limit, order})
+ *   - listVestingDelegationExpirations({start, limit, order})
+ *   - listVestingDelegations({start, limit, order})
+ *   - listVotes({start, limit, order})
+ *   - listWithdrawVestingRoutes({start, limit, order})
+ *   — misc —
+ *   - getRewardFunds()
+ *   - getHardforkProperties()
  *
  * tags (TagsAPI):
  *   - getTrendingTags(afterTag, limit)
@@ -71,6 +103,7 @@
  *   - lookupAccountNames(accounts)
  *   - getAccountCount()
  *   - getAccountHistory(account, from, limit, operationBitmask)
+ *   - getAccountHistoryFull({account, start, limit, includeReversible, operationFilterLow, operationFilterHigh})
  *   - getAccountReputations(lowerBound, limit)
  *   - getAccountNotifications(account, limit)
  *   - getReadNotificationIds(account)
@@ -89,6 +122,7 @@
  *   - getTradeHistory(start, end, limit)
  *   - getMarketHistory(bucketSeconds, start, end)
  *   - getMarketHistoryBuckets()
+ *   - getVolume()
  *
  * authority (AuthorityAPI):
  *   - getOwnerHistory(account)
@@ -182,6 +216,10 @@
  *   - recoverAccount(accountToRecover, newOwnerAuthority, recentOwnerAuthority)
  *   - changeRecoveryAccount(accountToRecover, newRecoveryAccount)
  *   - declineVotingRights(account, decline)
+ *   — raw passthroughs (pre-signed transactions) —
+ *   - broadcastTransaction(tx)
+ *   - broadcastTransactionSynchronous(tx)
+ *   - networkBroadcastTransaction(tx)
  *
  * auth (AuthAPI):
  *   - isWif(key)
@@ -212,11 +250,17 @@
  *   - getBlockNumberStream()
  *   - getBlockStream()
  *   - getOperationsStream()
+ *   - getPotentialSignatures(tx)
+ *   - getRequiredSignatures(tx, availableKeys)
+ *   - isKnownTransaction(trxId)
+ *   - getTransactionFromHistory(trxId, includeReversible)
  *
  * rc (ResourceCreditsAPI):
  *   - getResourceParams()
  *   - getResourcePool()
  *   - findRcAccounts(accounts)
+ *   - listRcAccounts({start, limit})
+ *   - listRcDirectDelegations({start, limit})
  *   - getRCMana(account)
  *   - getVPMana(account)
  *   - calculateRCMana(rcAccount)
@@ -257,6 +301,16 @@
  *
  * transaction (TransactionStatusAPI):
  *   - findTransaction(transactionId, expiration)
+ *
+ * jsonrpc (JsonRpcAPI):
+ *   - getMethods(forceRefresh)
+ *   - getSignature(method)
+ *   - hasMethod(method)
+ *   - getNamespaces()
+ *   - clearCache()
+ *
+ * rewards (RewardsAPI):
+ *   - simulateCurvePayouts({variableReward, posts})
  */
 
 import { LacertaDB } from '@pixagram/lacerta-db';
@@ -305,7 +359,7 @@ let _initSecureVault = null;
 
 // Schema stamp — bump when collections or indexes change.
 // On warm start the entire collection/index setup is skipped.
-const SCHEMA_VERSION = 'pixa_schema_4.2.3';
+const SCHEMA_VERSION = 'pixa_schema_4.3.0';
 
 // ============================================
 // Configuration
@@ -316,18 +370,20 @@ const CONFIG = {
     ARGON2_ITERATIONS: 2,
     ARGON2_AUTOTUNE_TTL: 7 * 24 * 60 * 60 * 1000, // re-benchmark after 7 days
     CACHE_TTL: {
-        posts: 60 * 1000,
-        accounts: 24 * 60 * 60 * 1000,
-        comments: 60 * 1000,
-        trending: 5 * 60 * 1000,
-        feed: 30 * 1000,
-        communities: 60 * 60 * 1000,
-        rewards: 5 * 60 * 1000,
-        search: 10 * 60 * 1000,
-        blocks: 30 * 1000,
-        witnesses: 5 * 60 * 1000,
-        market: 60 * 1000,
-        global_props: 10 * 1000
+        // v4.3.0: All set to 0 — always fetch fresh from RPC.
+        // Cached data is only used for offline fallback (stale reads).
+        posts: 0,
+        accounts: 0,
+        comments: 0,
+        trending: 0,
+        feed: 0,
+        communities: 0,
+        rewards: 0,
+        search: 0,
+        blocks: 0,
+        witnesses: 0,
+        market: 0,
+        global_props: 0,
     },
     ENTITY_TTL: {
         accounts: 24 * 60 * 60 * 1000,
@@ -335,21 +391,23 @@ const CONFIG = {
         comments: 2 * 60 * 1000,
     },
     QUERY_TTL: {
-        trending: 5 * 60 * 1000,
-        created: 30 * 1000,
-        hot: 3 * 60 * 1000,
-        promoted: 5 * 60 * 1000,
-        active: 60 * 1000,
-        blog: 60 * 1000,
-        feed: 30 * 1000,
-        comments: 60 * 1000,
-        votes: 60 * 1000,
-        children: 60 * 1000,
-        cashout: 60 * 1000,
-        content: 60 * 1000,
-        content_replies: 60 * 1000,
-        account_lookup: 10 * 60 * 1000,
-        notifications: 30 * 1000,
+        // v4.3.0: All set to 0 — queries always fetch fresh from RPC.
+        // Cached data is only used for offline fallback (allowStale: true).
+        trending: 0,
+        created: 0,
+        hot: 0,
+        promoted: 0,
+        active: 0,
+        blog: 0,
+        feed: 0,
+        comments: 0,
+        votes: 0,
+        children: 0,
+        cashout: 0,
+        content: 0,
+        content_replies: 0,
+        account_lookup: 0,
+        notifications: 0,
     },
     SESSION_TIMEOUT: 30 * 60 * 1000,
     PIN_TIMEOUT: 5 * 60 * 1000,
@@ -373,7 +431,14 @@ const CONFIG = {
     ],
     APP_NAME: 'pixagram/4.2.0',
     PAGINATION_LIMIT: 20,
-    CHAIN_ID: null,
+    // Testnet chain ID (HIVE-shared value). This used to be the library's
+    // DEFAULT_CHAIN_ID in dpixa <= 1.3.x, so leaving CHAIN_ID null "just worked"
+    // against testnet by coincidence — mainnet and testnet constants were
+    // identical. Starting with dpixa 1.4.x the mainnet constant was flipped to
+    // the ASCII-"pixagram"+zeros value for the live chain cutover, while the
+    // testnet constant was kept at 18dcf0…4e. Pinning it here makes the proxy
+    // independent of whatever `DEFAULT_CHAIN_ID` the installed dpixa exposes.
+    CHAIN_ID: '18dcf0a285365fc58b71f18b3d3fec954aa0c141c44e4e5cb4cf777b9eab274e',
     ADDRESS_PREFIX: 'PIX',
 
     // Asset symbol mapping: [blockchain_symbol, display_symbol]
@@ -685,6 +750,33 @@ const VALIDATORS = {
             time:    VALIDATORS.safe_timestamp(v.time),
         };
     },
+    /**
+     * Bridge-style post moderation stats block.
+     * Shape: { gray, hide, is_pinned, flag_weight, total_votes }
+     * All fields optional; missing → safe defaults. Always returns a non-null
+     * object so downstream code can read `stats.hide` without guarding.
+     */
+    safe_stats: (s) => {
+        if (!s || typeof s !== 'object') {
+            return { gray: false, hide: false, is_pinned: false, flag_weight: 0, total_votes: 0 };
+        }
+        return {
+            gray:        VALIDATORS.safe_bool(s.gray) ?? false,
+            hide:        VALIDATORS.safe_bool(s.hide) ?? false,
+            is_pinned:   VALIDATORS.safe_bool(s.is_pinned) ?? false,
+            flag_weight: VALIDATORS.safe_number(s.flag_weight) ?? 0,
+            total_votes: VALIDATORS.safe_number(s.total_votes) ?? 0,
+        };
+    },
+    /**
+     * Community role string. HIVE bridge uses: 'owner' | 'admin' | 'mod' |
+     * 'member' | 'guest' | 'muted'. Unknown values → empty string.
+     */
+    safe_community_role: (s) => {
+        if (typeof s !== 'string') return '';
+        const t = s.trim().toLowerCase();
+        return ['owner', 'admin', 'mod', 'member', 'guest', 'muted'].includes(t) ? t : '';
+    },
 };
 
 // ============================================
@@ -746,6 +838,45 @@ function normalizeAccount(account) {
 }
 
 // ============================================
+// No-op cache factories (installed in place of the real query cache &
+// entity store to disable LacertaDB persistence). Reads always miss,
+// writes are discarded. The objects match the public surface of
+// QueryCacheManager / EntityStoreManager closely enough that every
+// call site in the API layer behaves as if the caches were present
+// but permanently empty — so the "fail-closed if caches missing"
+// guards in the various API classes stay satisfied.
+// ============================================
+
+function _createNoopQueryCache() {
+    return {
+        // Stored_at is returned as undefined so allowStale callers don't
+        // receive a bogus timestamp. Always-miss semantics.
+        async get(_queryKey, _ttlCategory, _opts) { return null; },
+        async store(_queryKey, _ids, _entityType) { /* discarded */ },
+        async invalidate(_queryKey) { /* no-op */ },
+        async invalidateByPrefix(_prefix) { /* no-op */ },
+    };
+}
+
+function _createNoopEntityStore() {
+    return {
+        async get(_type, _entityId, _opts) { return null; },
+        // resolve() contract: returns an array the same length as ids, with
+        // null placeholders for misses. Call sites (e.g. getRankedPosts)
+        // check `.every(r => r !== null)` to decide whether to trust the
+        // cache hit; with all nulls they always fall through to the network.
+        async resolve(_type, ids, _opts) {
+            if (!Array.isArray(ids)) return [];
+            return new Array(ids.length).fill(null);
+        },
+        async upsert(_type, _entity) { /* discarded */ },
+        async upsertMany(_type, _entities) { /* discarded */ },
+        async invalidate(_type, _entityId) { /* no-op */ },
+        async invalidateAll(_type) { /* no-op */ },
+    };
+}
+
+// ============================================
 // Main Pixa Proxy API Class
 // ============================================
 
@@ -781,6 +912,7 @@ export class PixaProxyAPI {
         this.tags = null;
         this.blocks = null;
         this.globals = null;
+        this.prices = null;
         this.accounts = null;
         this.market = null;
         this.authority = null;
@@ -796,6 +928,8 @@ export class PixaProxyAPI {
         this.communities = null;
         this.keys = null;
         this.transaction = null;
+        this.jsonrpc = null;
+        this.rewards = null;
 
         // Internal managers
         this.keyManager = null;
@@ -929,7 +1063,7 @@ export class PixaProxyAPI {
                     wasmSanitizeForInjection = mod.sanitizeForInjection;
                     return mod;
                 }),
-                JSLoader(() => import('@pixagram/dpixa')).then(mod => {
+                JSLoader(() => import('@pixagram/dpixa/dist/dpixa')).then(mod => {
                     Client             = mod.Client;
                     PrivateKey         = mod.PrivateKey;
                     PublicKey          = mod.PublicKey;
@@ -1016,6 +1150,7 @@ export class PixaProxyAPI {
             this.tags = new TagsAPI(this);
             this.blocks = new BlocksAPI(this);
             this.globals = new GlobalsAPI(this);
+            this.prices = new PricesAPI(this);
             this.accounts = new AccountsAPI(this);
             this.market = new MarketAPI(this);
             this.authority = new AuthorityAPI(this);
@@ -1031,6 +1166,8 @@ export class PixaProxyAPI {
             this.communities = new CommunitiesAPI(this);
             this.keys = new AccountByKeyAPI(this);
             this.transaction = new TransactionStatusAPI(this);
+            this.jsonrpc = new JsonRpcAPI(this);
+            this.rewards = new RewardsAPI(this);
 
             this.keyManager = new KeyManager(this.eventEmitter, this.config);
             this.cacheManager = new CacheManager(this.cacheDb);
@@ -1060,9 +1197,14 @@ export class PixaProxyAPI {
                     'feed_cache', 'tags', 'blocks', 'market',
                     'witnesses', 'globals', 'relationships', 'rewards',
                     'accounts_store', 'posts_store', 'comments_store',
-                    'query_cache'
+                    'query_cache', 'follow_cache'
                 ];
-                const settingsCollections = ['sessions', 'preferences', 'accounts_registry', 'notification_reads'];
+                // pq_vault_config: stores cached Argon2id auto-tune benchmark
+                // ({ memoryKib, iterations, parallelism, label, measuredMs, tunedAt }).
+                // Must be ensured here — _initVaultCore() writes to it on first launch,
+                // and without this entry the write throws "Collection not found" and
+                // the benchmark re-runs on every page load.
+                const settingsCollections = ['sessions', 'preferences', 'accounts_registry', 'notification_reads', 'pq_vault_config'];
 
                 await Promise.all([
                     this._setupCollectionGroup(this.cacheDb, cacheCollections, 'cache'),
@@ -1105,8 +1247,20 @@ export class PixaProxyAPI {
             // raw data (fail-closed).
             if (this.sanitizerReady) {
                 this.sanitizationPipeline = new SanitizationPipeline(this.contentSanitizer, this.formatter);
-                this.entityStore = new EntityStoreManager(this.cacheDb, this.sanitizationPipeline, this.config.ENTITY_TTL);
-                this.queryCache = new QueryCacheManager(this.cacheDb, this.config.QUERY_TTL);
+                // ── Caching DISABLED by request ──────────────────────────
+                // The query cache (query → id list) and entity store
+                // (id → sanitized content / account) are replaced with
+                // no-op stubs. Every call site still sees truthy
+                // queryCache + entityStore so the fail-closed guards in
+                // the API layer stay satisfied, but:
+                //  • reads always miss (return null / array of nulls)
+                //  • writes are discarded
+                // Net effect: every query hits the network and returns
+                // fresh sanitized data, nothing is persisted to LacertaDB.
+                // Re-enable by swapping these two lines for the real
+                // `new EntityStoreManager(...)` / `new QueryCacheManager(...)`.
+                this.entityStore = _createNoopEntityStore();
+                this.queryCache = _createNoopQueryCache();
             } else {
                 this.sanitizationPipeline = null;
                 this.entityStore = null;
@@ -1207,17 +1361,22 @@ export class PixaProxyAPI {
             // _cachedKeys, but KeyManager.sessionKeys (an in-memory Map) is
             // not synced. Without this, requestKey() finds nothing in
             // KeyManager and falls through to key_required.
+            // FIX (v4.5 — key zeroing): Previous code passed raw Uint8Array
+            // references from SessionManager.getKeys() into cacheKeys(), which
+            // calls _encryptForCache(). That method zeros its input via
+            // plainBytes.fill(0) — but when the input IS SessionManager's
+            // internal #cachedKeys buffer (same reference), this silently
+            // destroys the canonical key material. Any later re-sync
+            // (e.g. after PIN timeout → re-unlock) would cache null bytes.
+            //
+            // _syncKeysToKeyManager() is safe: it calls exportKeysAsStrings()
+            // which creates NEW string copies, so the fill(0) targets a
+            // transient TextEncoder buffer instead of SM internals.
             this.eventEmitter.on('account_switched', async ({ account, mode }) => {
                 if (mode === SessionMode.PERSIST && this.keyManager && this.sessionManager) {
                     try {
-                        const keys = this.sessionManager.getKeys();
-                        if (keys) {
-                            if (!this.keyManager._sessionCryptoKey) {
-                                await this.keyManager._generateSessionCryptoKey();
-                            }
-                            await this.keyManager.cacheKeys(account, keys);
-                            this.keyManager.setActiveAccount(account);
-                        }
+                        await this._syncKeysToKeyManager(account);
+                        this.keyManager.setActiveAccount(account);
                     } catch (_) {}
                 }
             });
@@ -1425,7 +1584,21 @@ export class PixaProxyAPI {
                         && cached.tunedAt && (Date.now() - cached.tunedAt) < this.config.ARGON2_AUTOTUNE_TTL) {
                         this.vault.memoryKib = cached.memoryKib;
                         this.vault.iterations = cached.iterations;
+                        if (cached.parallelism) this.vault.parallelism = cached.parallelism;
                         restoredFromCache = true;
+
+                        // Announce the restored profile so UIs mounted after vault
+                        // init (e.g. LoginDialog) don't miss the first-run event.
+                        try {
+                            this.eventEmitter?.emit?.('vault_autotune_ready', {
+                                memoryKib: cached.memoryKib,
+                                iterations: cached.iterations,
+                                parallelism: cached.parallelism || this.vault.parallelism,
+                                label: cached.label || null,
+                                measuredMs: cached.measuredMs ?? -1,
+                                fromCache: true,
+                            });
+                        } catch (_) {}
                     }
                 } catch (_) {}
             }
@@ -1437,14 +1610,31 @@ export class PixaProxyAPI {
                         try {
                             const configCol = await this.settingsDb.getCollection('pq_vault_config');
                             const record = {
-                                memoryKib: tuned.memoryKib, iterations: tuned.iterations,
-                                label: tuned.label, measuredMs: tuned.measuredMs, tunedAt: Date.now(),
+                                memoryKib: tuned.memoryKib,
+                                iterations: tuned.iterations,
+                                parallelism: tuned.parallelism ?? this.vault.parallelism,
+                                label: tuned.label,
+                                measuredMs: tuned.measuredMs,
+                                tunedAt: Date.now(),
                             };
                             await configCol.upsert('autotune_params', record);
                         } catch (e) {
                             console.warn('[Vault] Failed to persist auto-tune:', e.message);
                         }
                     }
+
+                    // Fire regardless of whether persistence succeeded — the in-memory
+                    // vault is tuned and UIs should reflect that immediately.
+                    try {
+                        this.eventEmitter?.emit?.('vault_autotune_ready', {
+                            memoryKib: tuned.memoryKib,
+                            iterations: tuned.iterations,
+                            parallelism: tuned.parallelism ?? this.vault.parallelism,
+                            label: tuned.label,
+                            measuredMs: tuned.measuredMs,
+                            fromCache: false,
+                        });
+                    } catch (_) {}
                 } catch (e) {
                     console.warn('[Vault] autoTune failed, using defaults:', e.message);
                 }
@@ -1841,9 +2031,13 @@ export class PixaProxyAPI {
             'feed_cache', 'tags', 'blocks', 'market',
             'witnesses', 'globals', 'relationships', 'rewards',
             'accounts_store', 'posts_store', 'comments_store',
-            'query_cache'
+            'query_cache', 'follow_cache'
         ];
-        const settingsCollections = ['sessions', 'preferences', 'accounts_registry'];
+        // Keep this list in sync with the cold-init path in the ctor — both
+        // methods create the same settings-db schema. notification_reads and
+        // pq_vault_config must both be present (the latter holds the Argon2
+        // auto-tune benchmark cache that _initVaultCore() writes to).
+        const settingsCollections = ['sessions', 'preferences', 'accounts_registry', 'notification_reads', 'pq_vault_config'];
         await Promise.all([
             this._setupCollectionGroup(this.cacheDb, cacheCollections, 'cache'),
             this._setupCollectionGroup(this.settingsDb, settingsCollections, 'settings'),
@@ -1856,35 +2050,34 @@ export class PixaProxyAPI {
     /**
      * Index definitions per entity store collection.
      * Each index enables efficient queries without full-collection scans.
+     *
+     * v4.3.0: Pruned low-value indexes (id, reputation, post_count on accounts;
+     * pending_payout, net_votes on posts) that were never queried via findByIndex.
+     * Added _entity_id indexes for the primary lookup path (get/resolve).
+     * Kept _stored_at for TTL eviction and field indexes used in actual queries.
      */
     static get ENTITY_INDEXES() {
         return {
             accounts_store: [
-                { field: 'id',          name: 'idx_account_id'         },
-                { field: 'reputation',  name: 'idx_account_reputation' },
-                { field: 'created',     name: 'idx_account_created'    },
-                { field: 'last_post',   name: 'idx_account_last_post'  },
-                { field: 'post_count',  name: 'idx_account_post_count' },
+                { field: '_entity_id',  name: 'idx_account_entity_id', unique: true },
                 { field: '_stored_at',  name: 'idx_account_stored_at'  },
+                { field: 'name',        name: 'idx_account_name'       },
             ],
             posts_store: [
+                { field: '_entity_id',           name: 'idx_post_entity_id', unique: true },
                 { field: 'author',               name: 'idx_post_author'         },
                 { field: 'category',             name: 'idx_post_category'       },
                 { field: 'created',              name: 'idx_post_created'        },
-                { field: 'pending_payout_value', name: 'idx_post_pending_payout' },
-                { field: 'net_votes',            name: 'idx_post_net_votes'      },
                 { field: 'cashout_time',         name: 'idx_post_cashout'        },
-                { field: 'depth',                name: 'idx_post_depth'          },
                 { field: '_stored_at',           name: 'idx_post_stored_at'      },
             ],
             comments_store: [
+                { field: '_entity_id',      name: 'idx_comment_entity_id', unique: true },
                 { field: 'author',          name: 'idx_comment_author'          },
                 { field: 'parent_author',   name: 'idx_comment_parent_author'   },
                 { field: 'parent_permlink', name: 'idx_comment_parent_permlink' },
-                { field: 'created',         name: 'idx_comment_created'         },
-                { field: 'net_votes',       name: 'idx_comment_net_votes'       },
                 { field: 'root_author',     name: 'idx_comment_root_author'     },
-                { field: 'depth',           name: 'idx_comment_depth'           },
+                { field: 'created',         name: 'idx_comment_created'         },
                 { field: '_stored_at',      name: 'idx_comment_stored_at'       },
             ],
             query_cache: [
@@ -1904,12 +2097,31 @@ export class PixaProxyAPI {
             try {
                 const col = this.cacheDb.ensureCollection(collectionName);
                 for (const idx of indexes) {
-                    await col.createIndex(idx.field, { name: idx.name, unique: false }).catch(() => {});
+                    await col.createIndex(idx.field, { name: idx.name, unique: idx.unique || false }).catch(() => {});
                 }
             } catch (e) {
                 console.warn(`[PixaProxyAPI] Index setup for ${collectionName} skipped:`, e.message);
             }
         }
+    }
+
+    /**
+     * Maximum document count per entity store collection.
+     * When exceeded after a batch upsert, oldest entries (by _stored_at) are pruned.
+     * Prevents unbounded IDB growth on devices with limited storage.
+     */
+    static get COLLECTION_MAX_DOCS() {
+        return {
+            accounts_store: 100,
+            posts_store:    100,
+            comments_store: 100,
+            query_cache:    10,
+            follow_cache:   1000,
+            globals:        50,
+            market:         50,
+            witnesses:      50,
+            tags:           100,
+        };
     }
 
     async _setupCollectionGroup(db, collectionNames, groupName) {
@@ -1918,11 +2130,10 @@ export class PixaProxyAPI {
         }
     }
 
-    async setupVaultCollections() {
-        // v6: sealed_keys collection is no longer used.
-        // pq_vault_config is kept only for Argon2 auto-tune benchmark caching.
-        try { await this.settingsDb.createCollection('pq_vault_config'); } catch (e) {}
-    }
+    // setupVaultCollections — REMOVED. pq_vault_config is now ensured as part
+    // of settingsCollections in both the cold-init path (ctor) and the standalone
+    // setupCollections() method. Calling getCollection('pq_vault_config') in
+    // _initVaultCore() is now safe.
 
 
     // _sealKeysToVault — REMOVED in v6.
@@ -2089,6 +2300,14 @@ export class PixaProxyAPI {
             total_payout_value: translateAssetFromChain(post.total_payout_value || '0.000 PXS'),
             curator_payout_value: translateAssetFromChain(post.curator_payout_value || '0.000 PXS'),
             url: post.url || '',
+
+            // Community & moderation (bridge-enriched fields)
+            community:       this.contentSanitizer.safeString(post.community || '', 64),
+            community_title: this.contentSanitizer.safeString(post.community_title || '', 256),
+            author_role:     VALIDATORS.safe_community_role(post.author_role),
+            author_title:    this.contentSanitizer.safeString(post.author_title || '', 256),
+            stats:           VALIDATORS.safe_stats(post.stats),
+            is_paidout:      VALIDATORS.safe_bool(post.is_paidout) ?? false,
         };
     }
 
@@ -2152,6 +2371,14 @@ export class PixaProxyAPI {
             root_author: comment.root_author || '',
             root_permlink: comment.root_permlink || '',
             url: comment.url || '',
+
+            // Community & moderation (bridge-enriched fields)
+            community:       this.contentSanitizer.safeString(comment.community || '', 64),
+            community_title: this.contentSanitizer.safeString(comment.community_title || '', 256),
+            author_role:     VALIDATORS.safe_community_role(comment.author_role),
+            author_title:    this.contentSanitizer.safeString(comment.author_title || '', 256),
+            stats:           VALIDATORS.safe_stats(comment.stats),
+            is_paidout:      VALIDATORS.safe_bool(comment.is_paidout) ?? false,
         };
     }
 
@@ -2406,6 +2633,323 @@ class DatabaseAPI {
     async getDatabaseInfo() {
         return this.call('get_database_info');
     }
+
+    // ========================================================================
+    // database_api.* — Modern AppBase methods (v4.3.0)
+    // ========================================================================
+    // These methods call database_api directly rather than via the condenser
+    // shim. They are the canonical AppBase endpoints and should be preferred
+    // for new code paths.
+    // ========================================================================
+
+    /**
+     * Generic helper for database_api.* calls with try/catch + fallback.
+     * @param {string} method
+     * @param {object} params
+     * @param {*} fallback - Value to return on failure (default [])
+     * @returns {Promise<*>}
+     * @private
+     */
+    async _db(method, params = {}, fallback = []) {
+        try {
+            return await this.proxy.client.call('database_api', method, params);
+        } catch (e) {
+            console.warn(`[DatabaseAPI] ${method} failed:`, e.message);
+            return fallback;
+        }
+    }
+
+    // ── find_* family (look up by exact key) ────────────────────────────────
+
+    /**
+     * Find accounts by exact names (modern AppBase replacement for
+     * condenser_api.get_accounts). Returns raw AppBase account shape.
+     * @param {string[]} accounts - Account names
+     * @param {boolean} [delayedVotesActive=true]
+     * @returns {Promise<object[]>}
+     */
+    async findAccounts(accounts, delayedVotesActive = true) {
+        const normalized = (accounts || []).map(a => normalizeAccount(a)).filter(Boolean);
+        if (!normalized.length) return [];
+        const result = await this._db('find_accounts', {
+            accounts: normalized,
+            delayed_votes_active: delayedVotesActive
+        }, null);
+        return result?.accounts || [];
+    }
+
+    /**
+     * Find comments/posts by [author, permlink] tuples.
+     * @param {Array<[string,string]>} comments
+     * @returns {Promise<object[]>}
+     */
+    async findComments(comments) {
+        if (!Array.isArray(comments) || !comments.length) return [];
+        const result = await this._db('find_comments', { comments }, null);
+        return result?.comments || [];
+    }
+
+    /**
+     * Find votes for a given post.
+     * @param {string} author
+     * @param {string} permlink
+     * @returns {Promise<object[]>}
+     */
+    async findVotes(author, permlink) {
+        const result = await this._db('find_votes', {
+            author: normalizeAccount(author),
+            permlink
+        }, null);
+        return result?.votes || [];
+    }
+
+    /**
+     * Find pending change-recovery-account requests for an account.
+     * @param {string[]} accounts
+     * @returns {Promise<object[]>}
+     */
+    async findChangeRecoveryAccountRequests(accounts) {
+        const normalized = (accounts || []).map(normalizeAccount).filter(Boolean);
+        if (!normalized.length) return [];
+        const result = await this._db('find_change_recovery_account_requests', {
+            accounts: normalized
+        }, null);
+        return result?.requests || [];
+    }
+
+    /**
+     * Find pending collateralized-convert (HIVE→HBD) requests.
+     * @param {string} account
+     * @returns {Promise<object[]>}
+     */
+    async findCollateralizedConversionRequests(account) {
+        const result = await this._db('find_collateralized_conversion_requests', {
+            account: normalizeAccount(account)
+        }, null);
+        return result?.requests || [];
+    }
+
+    /**
+     * Find active decline-voting-rights requests.
+     * @param {string[]} accounts
+     * @returns {Promise<object[]>}
+     */
+    async findDeclineVotingRightsRequests(accounts) {
+        const normalized = (accounts || []).map(normalizeAccount).filter(Boolean);
+        if (!normalized.length) return [];
+        const result = await this._db('find_decline_voting_rights_requests', {
+            accounts: normalized
+        }, null);
+        return result?.requests || [];
+    }
+
+    /**
+     * Find escrows where the given account is `from`.
+     * @param {string} from
+     * @returns {Promise<object[]>}
+     */
+    async findEscrows(from) {
+        const result = await this._db('find_escrows', {
+            from: normalizeAccount(from)
+        }, null);
+        return result?.escrows || [];
+    }
+
+    /**
+     * Find pending HBD→HIVE conversion requests for an account.
+     * @param {string} account
+     * @returns {Promise<object[]>}
+     */
+    async findHbdConversionRequests(account) {
+        const result = await this._db('find_hbd_conversion_requests', {
+            account: normalizeAccount(account)
+        }, null);
+        return result?.requests || [];
+    }
+
+    /**
+     * Find open limit orders for an account.
+     * @param {string} account
+     * @returns {Promise<object[]>}
+     */
+    async findLimitOrders(account) {
+        const result = await this._db('find_limit_orders', {
+            account: normalizeAccount(account)
+        }, null);
+        return result?.orders || [];
+    }
+
+    /**
+     * Find owner authority history entries for an account.
+     * @param {string} owner
+     * @returns {Promise<object[]>}
+     */
+    async findOwnerHistories(owner) {
+        const result = await this._db('find_owner_histories', {
+            owner: normalizeAccount(owner)
+        }, null);
+        return result?.owner_auths || [];
+    }
+
+    /**
+     * Find pending savings withdrawals for an account.
+     * @param {string} account
+     * @returns {Promise<object[]>}
+     */
+    async findSavingsWithdrawals(account) {
+        const result = await this._db('find_savings_withdrawals', {
+            account: normalizeAccount(account)
+        }, null);
+        return result?.withdrawals || [];
+    }
+
+    /**
+     * Find upcoming vesting-delegation expirations for an account.
+     * @param {string} account
+     * @returns {Promise<object[]>}
+     */
+    async findVestingDelegationExpirations(account) {
+        const result = await this._db('find_vesting_delegation_expirations', {
+            account: normalizeAccount(account)
+        }, null);
+        return result?.delegations || [];
+    }
+
+    /**
+     * Find active vesting delegations originating from an account.
+     * @param {string} account
+     * @returns {Promise<object[]>}
+     */
+    async findVestingDelegations(account) {
+        const result = await this._db('find_vesting_delegations', {
+            account: normalizeAccount(account)
+        }, null);
+        return result?.delegations || [];
+    }
+
+    /**
+     * Find withdraw-vesting routes for an account.
+     * @param {string} account
+     * @param {string} [order='by_withdraw_route']
+     * @returns {Promise<object[]>}
+     */
+    async findWithdrawVestingRoutes(account, order = 'by_withdraw_route') {
+        const result = await this._db('find_withdraw_vesting_routes', {
+            account: normalizeAccount(account),
+            order
+        }, null);
+        return result?.routes || [];
+    }
+
+    // ── list_* family (paginated enumeration) ────────────────────────────────
+
+    /**
+     * List accounts with pagination.
+     * @param {object} [params]
+     * @param {string} [params.start='']
+     * @param {number} [params.limit=100]
+     * @param {string} [params.order='by_name']
+     * @returns {Promise<object[]>}
+     */
+    async listAccounts({ start = '', limit = 100, order = 'by_name' } = {}) {
+        const result = await this._db('list_accounts', { start, limit, order }, null);
+        return result?.accounts || [];
+    }
+
+    async listChangeRecoveryAccountRequests({ start = '', limit = 100, order = 'by_account' } = {}) {
+        const result = await this._db('list_change_recovery_account_requests', {
+            start, limit, order
+        }, null);
+        return result?.requests || [];
+    }
+
+    async listComments({ start = [], limit = 100, order = 'by_cashout_time' } = {}) {
+        const result = await this._db('list_comments', { start, limit, order }, null);
+        return result?.comments || [];
+    }
+
+    async listDeclineVotingRightsRequests({ start = '', limit = 100, order = 'by_account' } = {}) {
+        const result = await this._db('list_decline_voting_rights_requests', {
+            start, limit, order
+        }, null);
+        return result?.requests || [];
+    }
+
+    async listEscrows({ start = [], limit = 100, order = 'by_from_id' } = {}) {
+        const result = await this._db('list_escrows', { start, limit, order }, null);
+        return result?.escrows || [];
+    }
+
+    async listHbdConversionRequests({ start = [], limit = 100, order = 'by_conversion_date' } = {}) {
+        const result = await this._db('list_hbd_conversion_requests', {
+            start, limit, order
+        }, null);
+        return result?.requests || [];
+    }
+
+    async listLimitOrders({ start = [], limit = 100, order = 'by_price' } = {}) {
+        const result = await this._db('list_limit_orders', { start, limit, order }, null);
+        return result?.orders || [];
+    }
+
+    async listOwnerHistories({ start = [], limit = 100 } = {}) {
+        // list_owner_histories takes {start:[account, last_valid_time], limit}
+        const result = await this._db('list_owner_histories', { start, limit }, null);
+        return result?.owner_auths || [];
+    }
+
+    async listSavingsWithdrawals({ start = [], limit = 100, order = 'by_from_id' } = {}) {
+        const result = await this._db('list_savings_withdrawals', {
+            start, limit, order
+        }, null);
+        return result?.withdrawals || [];
+    }
+
+    async listVestingDelegationExpirations({ start = [], limit = 100, order = 'by_expiration' } = {}) {
+        const result = await this._db('list_vesting_delegation_expirations', {
+            start, limit, order
+        }, null);
+        return result?.delegations || [];
+    }
+
+    async listVestingDelegations({ start = [], limit = 100, order = 'by_delegation' } = {}) {
+        const result = await this._db('list_vesting_delegations', {
+            start, limit, order
+        }, null);
+        return result?.delegations || [];
+    }
+
+    async listVotes({ start = [], limit = 100, order = 'by_comment_voter' } = {}) {
+        const result = await this._db('list_votes', { start, limit, order }, null);
+        return result?.votes || [];
+    }
+
+    async listWithdrawVestingRoutes({ start = [], limit = 100, order = 'by_withdraw_route' } = {}) {
+        const result = await this._db('list_withdraw_vesting_routes', {
+            start, limit, order
+        }, null);
+        return result?.routes || [];
+    }
+
+    // ── Miscellaneous database_api.* ────────────────────────────────────────
+
+    /**
+     * Get all reward funds (plural, AppBase).
+     * Unlike condenser get_reward_fund (which takes one name), this returns all.
+     * @returns {Promise<object[]>}
+     */
+    async getRewardFunds() {
+        const result = await this._db('get_reward_funds', {}, null);
+        return result?.funds || [];
+    }
+
+    /**
+     * Get hardfork properties (current + processed HFs + next scheduled).
+     * @returns {Promise<object|null>}
+     */
+    async getHardforkProperties() {
+        return this._db('get_hardfork_properties', {}, null);
+    }
 }
 
 // ============================================
@@ -2452,10 +2996,10 @@ class TagsAPI {
 
             // ── Offline fallback: return stale cached data if available ──
             if (this.proxy.queryCache && this.proxy.entityStore) {
-                const stale = await this.proxy.queryCache.get(queryKey, sort);
+                const stale = await this.proxy.queryCache.get(queryKey, sort, { allowStale: true });
                 if (stale) {
                     const type = stale.entity_type || 'posts';
-                    const resolved = await this.proxy.entityStore.resolve(type, stale.ids);
+                    const resolved = await this.proxy.entityStore.resolve(type, stale.ids, { allowStale: true });
                     const available = resolved.filter(r => r !== null);
                     if (available.length > 0) {
                         available._stale = true;
@@ -2500,11 +3044,24 @@ class TagsAPI {
         return [];
     }
 
-    async getTrendingTags(afterTag = '', limit = 100) {
+    async getTrendingTags(afterTag = null, limit = 100) {
+        const cacheKey = `trending_tags_${afterTag || ''}_${limit}`;
+        if (this.proxy.cacheManager) {
+            const hit = await this.proxy.cacheManager.get('tags', cacheKey, this.proxy.config.CACHE_TTL.trending || 300000);
+            if (hit) return hit;
+        }
         try {
-            return await this.proxy.client.call('condenser_api', 'get_trending_tags', [afterTag, limit]);
+            const result = await this.proxy.client.call('condenser_api', 'get_trending_tags', [afterTag, limit]);
+            if (result && this.proxy.cacheManager) {
+                this.proxy.cacheManager.set('tags', cacheKey, result).catch(() => {});
+            }
+            return result || [];
         } catch (e) {
             console.warn('[TagsAPI] get_trending_tags failed:', e.message);
+            if (this.proxy.cacheManager) {
+                const stale = await this.proxy.cacheManager.get('tags', cacheKey, Infinity);
+                if (stale) { stale._stale = true; return stale; }
+            }
         }
         return [];
     }
@@ -2635,28 +3192,57 @@ class BlocksAPI {
 class GlobalsAPI {
     constructor(proxy) { this.proxy = proxy; }
 
+    async _cached(collection, key, ttlKey, fetchFn) {
+        if (this.proxy.cacheManager) {
+            const ttl = this.proxy.config.CACHE_TTL[ttlKey] || 60000;
+            const hit = await this.proxy.cacheManager.get(collection, key, ttl);
+            if (hit) return hit;
+        }
+        try {
+            const result = await fetchFn();
+            if (result && this.proxy.cacheManager) {
+                this.proxy.cacheManager.set(collection, key, result).catch(() => {});
+            }
+            return result;
+        } catch (e) {
+            console.warn(`[GlobalsAPI] ${key} failed:`, e.message);
+            // Offline fallback: return stale cached data
+            if (this.proxy.cacheManager) {
+                const stale = await this.proxy.cacheManager.get(collection, key, Infinity);
+                if (stale) { stale._stale = true; return stale; }
+            }
+            return null;
+        }
+    }
+
     async getDynamicGlobalProperties() {
-        return this.proxy.client.database.getDynamicGlobalProperties();
+        return this._cached('globals', 'dynamic_global_props', 'global_props',
+            () => this.proxy.client.database.getDynamicGlobalProperties());
     }
 
     async getChainProperties() {
-        return this.proxy.client.database.getChainProperties();
+        return this._cached('globals', 'chain_props', 'global_props',
+            () => this.proxy.client.database.getChainProperties());
     }
 
     async getFeedHistory() {
-        return this.proxy.client.call('condenser_api', 'get_feed_history');
+        return this._cached('globals', 'feed_history', 'global_props',
+            () => this.proxy.client.call('condenser_api', 'get_feed_history'));
     }
 
     async getCurrentMedianHistoryPrice() {
-        return this.proxy.client.database.getCurrentMedianHistoryPrice();
+        return this._cached('globals', 'median_history_price', 'global_props',
+            () => this.proxy.client.database.getCurrentMedianHistoryPrice());
     }
 
     async getHardforkVersion() {
-        return this.proxy.client.call('condenser_api', 'get_hardfork_version');
+        return this._cached('globals', 'hardfork_version', 'global_props',
+            () => this.proxy.client.call('condenser_api', 'get_hardfork_version'));
     }
 
     async getRewardFund(name = 'post') {
-        return this.proxy.client.call('condenser_api', 'get_reward_fund', [name]);
+        return this._cached('globals', `reward_fund_${name}`, 'rewards',
+            () => this.proxy.client.call('condenser_api', 'get_reward_fund', [name]));
     }
 
     async getVestingDelegations(account, from = '', limit = 100) {
@@ -2664,11 +3250,13 @@ class GlobalsAPI {
     }
 
     async getConfig() {
-        return this.proxy.client.database.getConfig();
+        return this._cached('globals', 'chain_config', 'global_props',
+            () => this.proxy.client.database.getConfig());
     }
 
     async getVersion() {
-        return this.proxy.client.database.getVersion();
+        return this._cached('globals', 'chain_version', 'global_props',
+            () => this.proxy.client.database.getVersion());
     }
 
     /**
@@ -2720,6 +3308,164 @@ class GlobalsAPI {
 }
 
 // ============================================
+// Prices API Group
+// ============================================
+
+/**
+ * Pricing logic for PXS/PXA/PXP.
+ *
+ * Economic model
+ * --------------
+ * Pixagram fixes canonical USD values by design:
+ *   - 1 PXS = $5.69  (Big Mac Index anchor — PXS is the stable "dollar" token
+ *                     with purchasing power pegged to a global basket)
+ *   - 1 PXA = $0.06  (design ratio ≈1:95 to PXS)
+ *   - 1 PXP = PXA/USD  (PXP is PXA-denominated staked influence)
+ *
+ * Witnesses publish a median price feed via feed_publish ops. The feed is shaped
+ *   { base: "X PXS", quote: "Y PXA" }
+ * and expresses the PXS↔PXA exchange rate. When the feed carries a plausible
+ * ratio (10:1–1000:1 PXA per PXS), we use it to override the design PXA/USD:
+ *
+ *   PXA/USD = PXS_USD × (base_PXS / quote_PXA)
+ *
+ * Outside that range — including the bootstrap placeholder `{0.001 PXS, 0.001 PXA}`
+ * which reads as 1:1 — we treat the feed as unset and use the design values.
+ *
+ * Consumer API
+ * ------------
+ *   const { pxaUsd, pxsUsd, source, feedRatio, isReal } = await api.prices.get();
+ *
+ * Or sync (returns design values until first fetch, then last known):
+ *   const { pxaUsd, pxsUsd } = api.prices.getSync();
+ *
+ * Reactive consumers:
+ *   api.eventEmitter.on('prices_updated', ({ pxaUsd, pxsUsd, ... }) => { ... });
+ *
+ * Values are cached via the existing CacheManager under the 'global_props' TTL.
+ */
+class PricesAPI {
+    static DESIGN_PXS_USD = 5.69;
+    static DESIGN_PXA_USD = 0.06;
+    static MIN_PLAUSIBLE_RATIO = 10;    // PXA per PXS
+    static MAX_PLAUSIBLE_RATIO = 1000;
+
+    constructor(proxy) {
+        this.proxy = proxy;
+        this._current = {
+            pxaUsd: PricesAPI.DESIGN_PXA_USD,
+            pxsUsd: PricesAPI.DESIGN_PXS_USD,
+            source: 'design',   // 'design' | 'feed'
+            feedRatio: null,    // raw PXA-per-PXS from feed, even when rejected
+            isReal: false,      // true once we've successfully read chain state at least once
+            lastUpdated: 0,
+        };
+        this._inFlight = null;  // shared promise for concurrent get() calls
+    }
+
+    /**
+     * Get current prices. If a fetch is in flight, returns that promise.
+     * If cached values are fresh enough, returns them. Otherwise triggers a
+     * refresh from chain.
+     */
+    async get({ forceRefresh = false } = {}) {
+        if (!forceRefresh && this._current.isReal &&
+            Date.now() - this._current.lastUpdated < (this.proxy.config.CACHE_TTL.global_props || 60000)) {
+            return { ...this._current };
+        }
+        if (this._inFlight) return this._inFlight;
+        this._inFlight = this._refresh();
+        try {
+            return await this._inFlight;
+        } finally {
+            this._inFlight = null;
+        }
+    }
+
+    /**
+     * Synchronous read of last-known prices. Returns design values before the
+     * first successful fetch. Use this in hot paths (renders) where waiting on
+     * a promise would cause jank; the async get() should be called separately
+     * to keep values fresh.
+     */
+    getSync() {
+        return { ...this._current };
+    }
+
+    async _refresh() {
+        let feed = null;
+        try {
+            feed = await this.proxy.globals.getCurrentMedianHistoryPrice();
+        } catch (e) {
+            console.warn('[PricesAPI] feed read failed:', e.message);
+        }
+
+        let pxaUsd = PricesAPI.DESIGN_PXA_USD;
+        let source = 'design';
+        let feedRatio = null;
+
+        if (feed && feed.base && feed.quote) {
+            const baseAmount  = parseFloat(feed.base)  || 0;  // PXS side
+            const quoteAmount = parseFloat(feed.quote) || 0;  // PXA side
+            if (baseAmount > 0 && quoteAmount > 0) {
+                feedRatio = quoteAmount / baseAmount;  // PXA per PXS
+                if (feedRatio >= PricesAPI.MIN_PLAUSIBLE_RATIO &&
+                    feedRatio <= PricesAPI.MAX_PLAUSIBLE_RATIO) {
+                    pxaUsd = PricesAPI.DESIGN_PXS_USD / feedRatio;
+                    source = 'feed';
+                }
+                // else: bootstrap/unset feed — keep design values
+            }
+        }
+
+        const next = {
+            pxaUsd,
+            pxsUsd: PricesAPI.DESIGN_PXS_USD,
+            source,
+            feedRatio,
+            isReal: feed !== null,  // we talked to chain, even if feed is unset
+            lastUpdated: Date.now(),
+        };
+
+        const changed = next.pxaUsd     !== this._current.pxaUsd
+            || next.pxsUsd     !== this._current.pxsUsd
+            || next.source     !== this._current.source
+            || next.feedRatio  !== this._current.feedRatio;
+
+        this._current = next;
+
+        if (changed && this.proxy.eventEmitter) {
+            try { this.proxy.eventEmitter.emit('prices_updated', { ...next }); }
+            catch (e) { /* listener error — don't propagate */ }
+        }
+
+        return { ...next };
+    }
+
+    /**
+     * Convert a PXA amount to USD at current rates.
+     */
+    pxaToUsd(pxa) {
+        return (parseFloat(pxa) || 0) * this._current.pxaUsd;
+    }
+
+    /**
+     * Convert a PXS amount to USD at current rates.
+     */
+    pxsToUsd(pxs) {
+        return (parseFloat(pxs) || 0) * this._current.pxsUsd;
+    }
+
+    /**
+     * Convert a post's PXS-denominated pending payout to USD.
+     * Equivalent to pxsToUsd — alias for intent clarity at call sites.
+     */
+    payoutToUsd(payout) {
+        return this.pxsToUsd(payout);
+    }
+}
+
+// ============================================
 // Accounts API Group
 // ============================================
 
@@ -2749,7 +3495,7 @@ class AccountsAPI {
 
             // ── Offline fallback: return stale cached accounts if available ──
             if (this.proxy.entityStore) {
-                const stale = await this.proxy.entityStore.resolve('accounts', normalizedAccounts);
+                const stale = await this.proxy.entityStore.resolve('accounts', normalizedAccounts, { allowStale: true });
                 const available = stale.filter(s => s !== null);
                 if (available.length > 0) {
                     available._stale = true;
@@ -2830,6 +3576,57 @@ class AccountsAPI {
             return await this.proxy.client.database.getAccountHistory(normalizedAccount, safeFrom, safeLimit);
         } catch (e) {
             console.warn('[AccountsAPI] getAccountHistory failed:', e.message);
+        }
+        return [];
+    }
+
+    /**
+     * Get account history with full AppBase parameter support, including
+     * the optional `include_reversible` flag that pulls operations from
+     * the reversible (not-yet-irreversible) block window. Uses the
+     * account_history_api namespace directly rather than condenser.
+     *
+     * @param {object} params
+     * @param {string}  params.account
+     * @param {number}  [params.start=-1]         Reverse index; -1 = most recent
+     * @param {number}  [params.limit=100]        Up to 1000
+     * @param {boolean} [params.includeReversible=false]
+     * @param {number}  [params.operationFilterLow]  Low 64 bits of op bitmask
+     * @param {number}  [params.operationFilterHigh] High 64 bits of op bitmask
+     * @returns {Promise<Array>} Raw history entries: [[seq, op], ...]
+     */
+    async getAccountHistoryFull({
+                                    account,
+                                    start = -1,
+                                    limit = 100,
+                                    includeReversible = false,
+                                    operationFilterLow = null,
+                                    operationFilterHigh = null
+                                } = {}) {
+        const normalizedAccount = normalizeAccount(account);
+        if (!normalizedAccount) return [];
+
+        // Same reverse-index safety as getAccountHistory
+        let safeFrom = start;
+        let safeLimit = limit;
+        if (safeFrom !== -1 && safeFrom < safeLimit - 1) {
+            safeLimit = safeFrom + 1;
+        }
+
+        const params = {
+            account: normalizedAccount,
+            start: safeFrom,
+            limit: safeLimit,
+            include_reversible: Boolean(includeReversible)
+        };
+        if (operationFilterLow !== null)  params.operation_filter_low  = operationFilterLow;
+        if (operationFilterHigh !== null) params.operation_filter_high = operationFilterHigh;
+
+        try {
+            const result = await this.proxy.client.call('account_history_api', 'get_account_history', params);
+            return result?.history || [];
+        } catch (e) {
+            console.warn('[AccountsAPI] get_account_history (appbase) failed:', e.message);
         }
         return [];
     }
@@ -3047,8 +3844,31 @@ class AccountsAPI {
 class MarketAPI {
     constructor(proxy) { this.proxy = proxy; }
 
+    async _cached(key, ttlKey, fetchFn) {
+        if (this.proxy.cacheManager) {
+            const ttl = this.proxy.config.CACHE_TTL[ttlKey] || 60000;
+            const hit = await this.proxy.cacheManager.get('market', key, ttl);
+            if (hit) return hit;
+        }
+        try {
+            const result = await fetchFn();
+            if (result && this.proxy.cacheManager) {
+                this.proxy.cacheManager.set('market', key, result).catch(() => {});
+            }
+            return result;
+        } catch (e) {
+            console.warn(`[MarketAPI] ${key} failed:`, e.message);
+            if (this.proxy.cacheManager) {
+                const stale = await this.proxy.cacheManager.get('market', key, Infinity);
+                if (stale) { stale._stale = true; return stale; }
+            }
+            return null;
+        }
+    }
+
     async getOrderBook(limit = 500) {
-        return this.proxy.client.call('condenser_api', 'get_order_book', [limit]);
+        return this._cached(`order_book_${limit}`, 'market',
+            () => this.proxy.client.call('condenser_api', 'get_order_book', [limit]));
     }
 
     async getOpenOrders(account) {
@@ -3057,7 +3877,8 @@ class MarketAPI {
     }
 
     async getTicker() {
-        return this.proxy.client.call('condenser_api', 'get_ticker');
+        return this._cached('ticker', 'market',
+            () => this.proxy.client.call('condenser_api', 'get_ticker'));
     }
 
     async getTradeHistory(start, end, limit = 1000) {
@@ -3069,7 +3890,17 @@ class MarketAPI {
     }
 
     async getMarketHistoryBuckets() {
-        return this.proxy.client.call('condenser_api', 'get_market_history_buckets');
+        return this._cached('history_buckets', 'market',
+            () => this.proxy.client.call('condenser_api', 'get_market_history_buckets'));
+    }
+
+    /**
+     * Get 24h trading volume for the internal market (condenser_api.get_volume).
+     * @returns {Promise<{hive_volume:string, hbd_volume:string}|null>}
+     */
+    async getVolume() {
+        return this._cached('volume_24h', 'market',
+            () => this.proxy.client.call('condenser_api', 'get_volume'));
     }
 }
 
@@ -3163,9 +3994,9 @@ class ContentAPI {
             // ── Offline fallback: retry entity store (may have expired-TTL data) ──
             if (this.proxy.entityStore) {
                 try {
-                    const stalePost = await this.proxy.entityStore.get('posts', entityId);
+                    const stalePost = await this.proxy.entityStore.get('posts', entityId, { allowStale: true });
                     if (stalePost) { stalePost._stale = true; return stalePost; }
-                    const staleComment = await this.proxy.entityStore.get('comments', entityId);
+                    const staleComment = await this.proxy.entityStore.get('comments', entityId, { allowStale: true });
                     if (staleComment) { staleComment._stale = true; return staleComment; }
                 } catch (_) {}
             }
@@ -3217,9 +4048,9 @@ class ContentAPI {
 
             // ── Offline fallback: return stale cached replies if available ──
             if (this.proxy.queryCache && this.proxy.entityStore) {
-                const stale = await this.proxy.queryCache.get(queryKey, 'content_replies');
+                const stale = await this.proxy.queryCache.get(queryKey, 'content_replies', { allowStale: true });
                 if (stale) {
-                    const resolved = await this.proxy.entityStore.resolve('comments', stale.ids);
+                    const resolved = await this.proxy.entityStore.resolve('comments', stale.ids, { allowStale: true });
                     const available = resolved.filter(r => r !== null);
                     if (available.length > 0) {
                         available._stale = true;
@@ -3264,11 +4095,23 @@ class ContentAPI {
 
     async getDiscussionsByAuthorBeforeDate(author, startPermlink, beforeDate, limit = 10) {
         const normalizedAuthor = normalizeAccount(author);
+        const queryKey = QueryCacheManager.buildKey('author_before_date', { author: normalizedAuthor, start_permlink: startPermlink, before_date: beforeDate, limit });
+
+        // Check query cache first
+        if (this.proxy.queryCache && this.proxy.entityStore) {
+            const cached = await this.proxy.queryCache.get(queryKey, 'blog');
+            if (cached) {
+                const resolved = await this.proxy.entityStore.resolve(cached.entity_type || 'posts', cached.ids);
+                if (resolved.every(r => r !== null)) return resolved;
+            }
+        }
+
         try {
             const rawResults = await this.proxy.client.call('condenser_api', 'get_discussions_by_author_before_date', [normalizedAuthor, startPermlink, beforeDate, limit]);
 
             // Sanitize and batch-store
             if (rawResults && this.proxy.sanitizationPipeline && this.proxy.entityStore) {
+                const ids = [];
                 const postEntities = [];
                 const commentEntities = [];
                 for (const raw of rawResults) {
@@ -3277,6 +4120,7 @@ class ContentAPI {
                         if (entity) {
                             if (entity._entity_type === 'post') postEntities.push(entity);
                             else commentEntities.push(entity);
+                            ids.push(entity._entity_id);
                         }
                     } catch (e) {
                         console.warn('[ContentAPI] Failed to sanitize entity, skipping:', raw?.author, raw?.permlink, e.message || e);
@@ -3286,6 +4130,7 @@ class ContentAPI {
                 const ops = [];
                 if (postEntities.length > 0) ops.push(this.proxy.entityStore.upsertMany('posts', postEntities));
                 if (commentEntities.length > 0) ops.push(this.proxy.entityStore.upsertMany('comments', commentEntities));
+                if (ids.length > 0 && this.proxy.queryCache) ops.push(this.proxy.queryCache.store(queryKey, ids, 'posts'));
                 if (ops.length > 0) Promise.all(ops).catch(e => console.warn('[ContentAPI] Background cache write failed:', e.message));
                 return [...postEntities, ...commentEntities];
             }
@@ -3296,6 +4141,20 @@ class ContentAPI {
             return [];
         } catch (e) {
             console.warn('[ContentAPI] get_discussions_by_author_before_date failed:', e.message);
+
+            // ── Offline fallback: return stale cached data if available ──
+            if (this.proxy.queryCache && this.proxy.entityStore) {
+                const stale = await this.proxy.queryCache.get(queryKey, 'blog', { allowStale: true });
+                if (stale) {
+                    const resolved = await this.proxy.entityStore.resolve(stale.entity_type || 'posts', stale.ids, { allowStale: true });
+                    const available = resolved.filter(r => r !== null);
+                    if (available.length > 0) {
+                        available._stale = true;
+                        available._cachedAt = stale.stored_at;
+                        return available;
+                    }
+                }
+            }
         }
         return [];
     }
@@ -3303,6 +4162,17 @@ class ContentAPI {
     async getRepliesByLastUpdate(author, startPermlink = '', limit = 10) {
         const normalizedAuthor = normalizeAccount(author);
         if (!normalizedAuthor) return [];
+
+        const queryKey = QueryCacheManager.buildKey('replies_last_update', { author: normalizedAuthor, start_permlink: startPermlink, limit });
+
+        // Check query cache first
+        if (this.proxy.queryCache && this.proxy.entityStore) {
+            const cached = await this.proxy.queryCache.get(queryKey, 'content_replies');
+            if (cached) {
+                const resolved = await this.proxy.entityStore.resolve('comments', cached.ids);
+                if (resolved.every(r => r !== null)) return resolved;
+            }
+        }
 
         try {
             // Use condenser_api.get_replies_by_last_update to fetch replies TO the user,
@@ -3315,20 +4185,23 @@ class ContentAPI {
 
             // Sanitize and batch-store as comments
             if (rawResults && this.proxy.sanitizationPipeline && this.proxy.entityStore) {
+                const ids = [];
                 const sanitized = [];
                 for (const raw of rawResults) {
                     try {
                         const entity = this.proxy.sanitizationPipeline.sanitizeComment(raw);
                         if (entity) {
                             sanitized.push(entity);
+                            ids.push(entity._entity_id);
                         }
                     } catch (e) {
                         console.warn('[ContentAPI] Failed to sanitize reply, skipping:', raw?.author, raw?.permlink, e.message || e);
                     }
                 }
                 // Fire-and-forget: persist to cache in background
-                this.proxy.entityStore.upsertMany('comments', sanitized)
-                    .catch(e => console.warn('[ContentAPI] Background cache write failed:', e.message));
+                const ops = [this.proxy.entityStore.upsertMany('comments', sanitized)];
+                if (ids.length > 0 && this.proxy.queryCache) ops.push(this.proxy.queryCache.store(queryKey, ids, 'comments'));
+                Promise.all(ops).catch(e => console.warn('[ContentAPI] Background cache write failed:', e.message));
                 return sanitized;
             }
             // SECURITY PATCH (v3.5.2-patched): FAIL-CLOSED
@@ -3338,6 +4211,20 @@ class ContentAPI {
             return [];
         } catch (e) {
             console.warn('[ContentAPI] getRepliesByLastUpdate failed:', e.message);
+
+            // ── Offline fallback: return stale cached replies if available ──
+            if (this.proxy.queryCache && this.proxy.entityStore) {
+                const stale = await this.proxy.queryCache.get(queryKey, 'content_replies', { allowStale: true });
+                if (stale) {
+                    const resolved = await this.proxy.entityStore.resolve('comments', stale.ids, { allowStale: true });
+                    const available = resolved.filter(r => r !== null);
+                    if (available.length > 0) {
+                        available._stale = true;
+                        available._cachedAt = stale.stored_at;
+                        return available;
+                    }
+                }
+            }
         }
         return [];
     }
@@ -3387,9 +4274,9 @@ class ContentAPI {
 
             // ── Offline fallback: return stale cached data if available ──
             if (this.proxy.queryCache && this.proxy.entityStore) {
-                const stale = await this.proxy.queryCache.get(queryKey, sort);
+                const stale = await this.proxy.queryCache.get(queryKey, sort, { allowStale: true });
                 if (stale) {
-                    const resolved = await this.proxy.entityStore.resolve(stale.entity_type || entityType, stale.ids);
+                    const resolved = await this.proxy.entityStore.resolve(stale.entity_type || entityType, stale.ids, { allowStale: true });
                     const available = resolved.filter(r => r !== null);
                     if (available.length > 0) {
                         available._stale = true;
@@ -3483,29 +4370,121 @@ class ContentAPI {
 class WitnessesAPI {
     constructor(proxy) { this.proxy = proxy; }
 
+    async _cached(key, fetchFn) {
+        const ttl = this.proxy.config.CACHE_TTL.witnesses || 300000;
+        if (this.proxy.cacheManager) {
+            const hit = await this.proxy.cacheManager.get('witnesses', key, ttl);
+            if (hit) return hit;
+        }
+        try {
+            const result = await fetchFn();
+            if (result && this.proxy.cacheManager) {
+                this.proxy.cacheManager.set('witnesses', key, result).catch(() => {});
+            }
+            return result;
+        } catch (e) {
+            console.warn(`[WitnessesAPI] ${key} failed:`, e.message);
+            if (this.proxy.cacheManager) {
+                const stale = await this.proxy.cacheManager.get('witnesses', key, Infinity);
+                if (stale) { stale._stale = true; return stale; }
+            }
+            return null;
+        }
+    }
+
     async getWitnessByAccount(account) {
         const normalizedAccount = normalizeAccount(account);
-        return this.proxy.client.call('condenser_api', 'get_witness_by_account', [normalizedAccount]);
+        return this._cached(`by_account_${normalizedAccount}`,
+            () => this.proxy.client.call('condenser_api', 'get_witness_by_account', [normalizedAccount]));
     }
 
     async getWitnessesByVote(from, limit = 100) {
-        return this.proxy.client.call('condenser_api', 'get_witnesses_by_vote', [from, limit]);
+        return this._cached(`by_vote_${from}_${limit}`,
+            () => this.proxy.client.call('condenser_api', 'get_witnesses_by_vote', [from, limit]));
     }
 
     async lookupWitnessAccounts(lowerBound, limit = 100) {
-        return this.proxy.client.call('condenser_api', 'lookup_witness_accounts', [lowerBound, limit]);
+        return this._cached(`lookup_${lowerBound}_${limit}`,
+            () => this.proxy.client.call('condenser_api', 'lookup_witness_accounts', [lowerBound, limit]));
     }
 
     async getWitnessCount() {
-        return this.proxy.client.call('condenser_api', 'get_witness_count');
+        return this._cached('count',
+            () => this.proxy.client.call('condenser_api', 'get_witness_count'));
     }
 
     async getActiveWitnesses() {
-        return this.proxy.client.call('condenser_api', 'get_active_witnesses');
+        return this._cached('active',
+            () => this.proxy.client.call('condenser_api', 'get_active_witnesses'));
     }
 
     async getWitnessSchedule() {
-        return this.proxy.client.call('condenser_api', 'get_witness_schedule');
+        return this._cached('schedule',
+            () => this.proxy.client.call('condenser_api', 'get_witness_schedule'));
+    }
+
+    /**
+     * List witnesses with full records (database_api.list_witnesses).
+     * Unlike lookup_witness_accounts (names only), this returns the full
+     * witness object: props, signing_key, votes, schedule fields, etc.
+     *
+     * @param {object}  [params]
+     * @param {string|Array} [params.start='']  Shape depends on order:
+     *        - 'by_name'          : string account name
+     *        - 'by_vote_name'     : [votes:string|number, account:string]
+     *        - 'by_schedule_time' : [virtual_scheduled_time:string, account:string]
+     * @param {number}  [params.limit=100]      Up to 1000
+     * @param {string}  [params.order='by_vote_name']  'by_name' | 'by_vote_name' | 'by_schedule_time'
+     * @returns {Promise<object[]>} Array of full witness records
+     */
+    async listWitnesses({ start = '', limit = 100, order = 'by_vote_name' } = {}) {
+        const cacheKey = `list_${order}_${JSON.stringify(start)}_${limit}`;
+        return this._cached(cacheKey, async () => {
+            const result = await this.proxy.client.call('database_api', 'list_witnesses', {
+                start, limit, order
+            });
+            return result?.witnesses || [];
+        });
+    }
+
+    /**
+     * List witness votes (database_api.list_witness_votes).
+     *
+     * @param {object} [params]
+     * @param {Array}  [params.start=['','']]
+     *        - 'by_account_witness' : [account:string, witness:string]
+     *        - 'by_witness_account' : [witness:string, account:string]
+     * @param {number} [params.limit=100]   Up to 1000
+     * @param {string} [params.order='by_account_witness']
+     * @returns {Promise<Array<{id:number, witness:string, account:string}>>}
+     */
+    async listWitnessVotes({ start = ['', ''], limit = 100, order = 'by_account_witness' } = {}) {
+        const cacheKey = `votes_${order}_${JSON.stringify(start)}_${limit}`;
+        return this._cached(cacheKey, async () => {
+            const result = await this.proxy.client.call('database_api', 'list_witness_votes', {
+                start, limit, order
+            });
+            return result?.votes || [];
+        });
+    }
+
+    /**
+     * Find witnesses by exact owner names (database_api.find_witnesses).
+     * Returns full witness records for each matching owner.
+     * @param {string[]} owners - Witness account names
+     * @returns {Promise<object[]>}
+     */
+    async findWitnesses(owners = []) {
+        if (!Array.isArray(owners) || owners.length === 0) return [];
+        const normalized = owners.map(normalizeAccount).filter(Boolean);
+        if (!normalized.length) return [];
+        const cacheKey = `find_${normalized.join(',')}`;
+        return this._cached(cacheKey, async () => {
+            const result = await this.proxy.client.call('database_api', 'find_witnesses', {
+                owners: normalized
+            });
+            return result?.witnesses || [];
+        });
     }
 }
 
@@ -3516,94 +4495,90 @@ class WitnessesAPI {
 class FollowAPI {
     constructor(proxy) { this.proxy = proxy; }
 
+    async _cached(key, ttl, fetchFn) {
+        if (this.proxy.cacheManager) {
+            const hit = await this.proxy.cacheManager.get('follow_cache', key, ttl);
+            if (hit) return hit;
+        }
+        try {
+            const result = await fetchFn();
+            if (result && this.proxy.cacheManager) {
+                this.proxy.cacheManager.set('follow_cache', key, result).catch(() => {});
+            }
+            return result;
+        } catch (e) {
+            console.warn(`[FollowAPI] ${key} failed:`, e.message);
+            if (this.proxy.cacheManager) {
+                const stale = await this.proxy.cacheManager.get('follow_cache', key, Infinity);
+                if (stale) { stale._stale = true; return stale; }
+            }
+            return null;
+        }
+    }
+
     async getFollowers(account, startFollower = null, type = 'blog', limit = 100) {
         const normalizedAccount = normalizeAccount(account);
         if (!normalizedAccount) return [];
         const safeLimit = parseInt(limit, 10) || 100;
+        const cacheKey = `followers_${normalizedAccount}_${startFollower || ''}_${type}_${safeLimit}`;
 
-        try {
-            return await this.proxy.client.call('condenser_api', 'get_followers', [normalizedAccount, startFollower, type, safeLimit]);
-        } catch (e) {
-            console.warn('[FollowAPI] get_followers failed:', e.message);
-        }
-        return [];
+        return await this._cached(cacheKey, 60000,
+            () => this.proxy.client.call('condenser_api', 'get_followers', [normalizedAccount, startFollower, type, safeLimit])) || [];
     }
 
     async getFollowing(account, startFollowing = null, type = 'blog', limit = 100) {
         const normalizedAccount = normalizeAccount(account);
         if (!normalizedAccount) return [];
         const safeLimit = parseInt(limit, 10) || 100;
+        const cacheKey = `following_${normalizedAccount}_${startFollowing || ''}_${type}_${safeLimit}`;
 
-        try {
-            return await this.proxy.client.call('condenser_api', 'get_following', [normalizedAccount, startFollowing, type, safeLimit]);
-        } catch (e) {
-            console.warn('[FollowAPI] get_following failed:', e.message);
-        }
-        return [];
+        return await this._cached(cacheKey, 60000,
+            () => this.proxy.client.call('condenser_api', 'get_following', [normalizedAccount, startFollowing, type, safeLimit])) || [];
     }
 
     async getFollowCount(account) {
         const normalizedAccount = normalizeAccount(account);
         if (!normalizedAccount) return { account: account || '', follower_count: 0, following_count: 0 };
+        const cacheKey = `follow_count_${normalizedAccount}`;
 
-        // condenser_api.get_follow_count — returns { account, follower_count, following_count }
-        try {
-            const result = await this.proxy.client.call('condenser_api', 'get_follow_count', [normalizedAccount]);
-            if (result) {
-                return {
-                    account: normalizedAccount,
-                    follower_count: result.follower_count || 0,
-                    following_count: result.following_count || 0
-                };
-            }
-        } catch (e) {
-            console.warn('[FollowAPI] getFollowCount failed:', e.message);
-        }
-        return { account: normalizedAccount, follower_count: 0, following_count: 0 };
+        const result = await this._cached(cacheKey, 120000, async () => {
+            const r = await this.proxy.client.call('condenser_api', 'get_follow_count', [normalizedAccount]);
+            if (r) return { account: normalizedAccount, follower_count: r.follower_count || 0, following_count: r.following_count || 0 };
+            return null;
+        });
+        return result || { account: normalizedAccount, follower_count: 0, following_count: 0 };
     }
 
     async getFeedEntries(account, startEntryId = 0, limit = 10) {
         const normalizedAccount = normalizeAccount(account);
+        const cacheKey = `feed_entries_${normalizedAccount}_${startEntryId}_${limit}`;
 
-        try {
-            return await this.proxy.client.call('condenser_api', 'get_feed_entries', [normalizedAccount, startEntryId, limit]);
-        } catch (e) {
-            console.warn('[FollowAPI] get_feed_entries failed:', e.message);
-        }
-        return [];
+        return await this._cached(cacheKey, 30000,
+            () => this.proxy.client.call('condenser_api', 'get_feed_entries', [normalizedAccount, startEntryId, limit])) || [];
     }
 
     async getBlogEntries(account, startEntryId = 0, limit = 10) {
         const normalizedAccount = normalizeAccount(account);
+        const cacheKey = `blog_entries_${normalizedAccount}_${startEntryId}_${limit}`;
 
-        try {
-            return await this.proxy.client.call('condenser_api', 'get_blog_entries', [normalizedAccount, startEntryId, limit]);
-        } catch (e) {
-            console.warn('[FollowAPI] get_blog_entries failed:', e.message);
-        }
-        return [];
+        return await this._cached(cacheKey, 60000,
+            () => this.proxy.client.call('condenser_api', 'get_blog_entries', [normalizedAccount, startEntryId, limit])) || [];
     }
 
     async getRebloggedBy(author, permlink) {
         const normalizedAuthor = normalizeAccount(author);
+        const cacheKey = `reblogged_by_${normalizedAuthor}_${permlink}`;
 
-        try {
-            return await this.proxy.client.call('condenser_api', 'get_reblogged_by', [normalizedAuthor, permlink]);
-        } catch (e) {
-            console.warn('[FollowAPI] get_reblogged_by failed:', e.message);
-        }
-        return [];
+        return await this._cached(cacheKey, 120000,
+            () => this.proxy.client.call('condenser_api', 'get_reblogged_by', [normalizedAuthor, permlink])) || [];
     }
 
     async getBlogAuthors(account) {
         const normalizedAccount = normalizeAccount(account);
+        const cacheKey = `blog_authors_${normalizedAccount}`;
 
-        try {
-            return await this.proxy.client.call('condenser_api', 'get_blog_authors', [normalizedAccount]);
-        } catch (e) {
-            console.warn('[FollowAPI] get_blog_authors failed:', e.message);
-        }
-        return [];
+        return await this._cached(cacheKey, 300000,
+            () => this.proxy.client.call('condenser_api', 'get_blog_authors', [normalizedAccount])) || [];
     }
 
     async getSubscriptions(account) {
@@ -3691,6 +4666,146 @@ class BroadcastAPI {
             }
             throw e; // Genuine chain/validation error — propagate
         }
+    }
+
+    /**
+     * Central cache invalidation dispatcher.
+     * Maps broadcast operation types to affected entity store entries and query cache prefixes.
+     * Fire-and-forget — errors are silently swallowed.
+     * @private
+     */
+    async _invalidateAfterBroadcast(operations, meta) {
+        const es = this.proxy.entityStore;
+        const qc = this.proxy.queryCache;
+        const cm = this.proxy.cacheManager;
+        if (!es && !qc && !cm) return;
+
+        const ops = [];
+
+        for (const [opType, opData] of operations) {
+            switch (opType) {
+                case 'vote': {
+                    const entityId = `${opData.author}_${opData.permlink}`;
+                    if (es) {
+                        ops.push(es.invalidate('posts', entityId));
+                        ops.push(es.invalidate('comments', entityId));
+                    }
+                    // Invalidate query caches that include this content
+                    if (qc) {
+                        ops.push(qc.invalidateByPrefix('trending'));
+                        ops.push(qc.invalidateByPrefix('hot'));
+                        ops.push(qc.invalidateByPrefix('content_blog'));
+                        ops.push(qc.invalidateByPrefix('content_feed'));
+                    }
+                    if (cm) ops.push(cm.invalidateKey('posts', entityId));
+                    break;
+                }
+
+                case 'comment': {
+                    const entityId = `${opData.author}_${opData.permlink}`;
+                    const isReply = opData.parent_author && opData.parent_author !== '';
+                    if (es) {
+                        if (isReply) {
+                            ops.push(es.invalidate('comments', entityId));
+                            // Invalidate parent's reply count
+                            const parentId = `${opData.parent_author}_${opData.parent_permlink}`;
+                            ops.push(es.invalidate('posts', parentId));
+                            ops.push(es.invalidate('comments', parentId));
+                        } else {
+                            ops.push(es.invalidate('posts', entityId));
+                        }
+                    }
+                    if (qc) {
+                        // Author's blog/feed queries
+                        ops.push(qc.invalidateByPrefix(`content_blog`));
+                        ops.push(qc.invalidateByPrefix(`content_comments`));
+                        ops.push(qc.invalidateByPrefix('created'));
+                        ops.push(qc.invalidateByPrefix('content_replies'));
+                        ops.push(qc.invalidateByPrefix('author_before_date'));
+                        ops.push(qc.invalidateByPrefix('replies_last_update'));
+                    }
+                    break;
+                }
+
+                case 'delete_comment': {
+                    const entityId = `${opData.author}_${opData.permlink}`;
+                    if (es) {
+                        ops.push(es.invalidate('posts', entityId));
+                        ops.push(es.invalidate('comments', entityId));
+                    }
+                    if (qc) {
+                        ops.push(qc.invalidateByPrefix('content_blog'));
+                        ops.push(qc.invalidateByPrefix('content_comments'));
+                        ops.push(qc.invalidateByPrefix('created'));
+                        ops.push(qc.invalidateByPrefix('content_replies'));
+                        ops.push(qc.invalidateByPrefix('author_before_date'));
+                    }
+                    break;
+                }
+
+                case 'transfer':
+                case 'transfer_to_vesting':
+                case 'withdraw_vesting':
+                case 'transfer_to_savings':
+                case 'transfer_from_savings':
+                case 'claim_reward_balance':
+                case 'delegate_vesting_shares': {
+                    // Invalidate affected account entities so balances refresh
+                    const accounts = new Set();
+                    if (opData.from) accounts.add(normalizeAccount(opData.from));
+                    if (opData.to) accounts.add(normalizeAccount(opData.to));
+                    if (opData.account) accounts.add(normalizeAccount(opData.account));
+                    if (opData.delegator) accounts.add(normalizeAccount(opData.delegator));
+                    if (opData.delegatee) accounts.add(normalizeAccount(opData.delegatee));
+                    if (es) {
+                        for (const acc of accounts) {
+                            if (acc) ops.push(es.invalidate('accounts', acc));
+                        }
+                    }
+                    break;
+                }
+
+                case 'custom_json': {
+                    // Parse follow/reblog/community ops
+                    try {
+                        const parsed = JSON.parse(opData.json);
+                        const [action, payload] = Array.isArray(parsed) ? parsed : [null, null];
+
+                        if (action === 'follow' && payload) {
+                            // Follow/unfollow/mute — invalidate follow cache
+                            if (cm) {
+                                const follower = payload.follower;
+                                const following = payload.following;
+                                if (follower) ops.push(cm.invalidateAll('follow_cache'));
+                            }
+                            if (qc) {
+                                ops.push(qc.invalidateByPrefix('content_feed'));
+                            }
+                        }
+
+                        if (action === 'reblog' && payload) {
+                            if (qc) {
+                                ops.push(qc.invalidateByPrefix('content_blog'));
+                                ops.push(qc.invalidateByPrefix('content_feed'));
+                            }
+                        }
+                    } catch (_) {}
+                    break;
+                }
+
+                case 'account_update':
+                case 'account_update2': {
+                    const acc = normalizeAccount(opData.account);
+                    if (acc && es) ops.push(es.invalidate('accounts', acc));
+                    break;
+                }
+
+                default:
+                    break;
+            }
+        }
+
+        if (ops.length > 0) await Promise.all(ops);
     }
 
     async updateAccount2(paramsOrAccount, jsonMetadata, postingJsonMetadata, extensions = []) {
@@ -3815,8 +4930,6 @@ class BroadcastAPI {
         }
 
         // ── Broadcast-level dedup: same (voter, author, permlink) in-flight → return existing promise ──
-        // Prevents duplicate transactions from double-clicks, React re-renders, or rapid toggles.
-        // Keyed per content piece so voting on different posts is never blocked.
         if (!this._inflightVotes) this._inflightVotes = new Map();
         const voteKey = `${normalizedVoter}/${normalizedAuthor}/${permlink}`;
         if (this._inflightVotes.has(voteKey)) {
@@ -3825,64 +4938,21 @@ class BroadcastAPI {
 
         // ── Internal broadcast helper (shared by direct & deferred paths) ──
         const _broadcastVote = async (finalWeight) => {
-            const voteOp = [['vote', {
+            const key = await this.proxy.keyManager.requestKey(normalizedVoter, 'posting');
+
+            const op = {
                 voter: normalizedVoter,
                 author: normalizedAuthor,
                 permlink,
                 weight: finalWeight,
-            }]];
+            };
 
-            const key = await this.proxy.keyManager.requestKey(normalizedVoter, 'posting');
-            const privateKey = PrivateKey.fromString(key);
+            const result = await this._send(
+                [['vote', op]], key,
+                { account: normalizedVoter, voter: normalizedVoter, author: normalizedAuthor, permlink, keyType: 'posting' }
+            );
 
-            let result;
-            // Offline + queue: defer for later drain
-            if (this.proxy.broadcastQueue && this.proxy.connectivity && !this.proxy.connectivity.isOnline) {
-                result = await this.proxy.broadcastQueue.enqueue('vote', voteOp, {
-                    account: normalizedVoter,
-                    voter: normalizedVoter,
-                    author: normalizedAuthor,
-                    permlink,
-                    keyType: 'posting',
-                });
-            } else {
-                // Online: broadcast directly with the caller's key
-                try {
-                    result = await this.proxy.client.broadcast.vote({
-                        voter: normalizedVoter,
-                        author: normalizedAuthor,
-                        permlink,
-                        weight: finalWeight
-                    }, privateKey);
-                } catch (e) {
-                    // Network failure — try to queue if we went offline
-                    if (this.proxy.broadcastQueue && this.proxy.connectivity) {
-                        const stillOnline = await this.proxy.connectivity.checkNow();
-                        if (!stillOnline) {
-                            result = await this.proxy.broadcastQueue.enqueue('vote', voteOp, {
-                                account: normalizedVoter,
-                                voter: normalizedVoter,
-                                author: normalizedAuthor,
-                                permlink,
-                                keyType: 'posting',
-                            });
-                        } else {
-                            throw e;
-                        }
-                    } else {
-                        throw e;
-                    }
-                }
-            }
-
-            // Invalidate cache (skip if the op was queued for later)
-            if (!result?.queued) {
-                await this.proxy.cacheManager.invalidateKey('posts', `${normalizedAuthor}_${permlink}`);
-                if (this.proxy.entityStore) {
-                    await this.proxy.entityStore.invalidate('posts', `${normalizedAuthor}_${permlink}`);
-                    await this.proxy.entityStore.invalidate('comments', `${normalizedAuthor}_${permlink}`);
-                }
-            }
+            // v4.3.0: Entity/query invalidation handled centrally by _send()._invalidateAfterBroadcast()
             return result;
         };
 
@@ -3891,7 +4961,6 @@ class BroadcastAPI {
             // ── Deferred path: let the UI adjust weight before broadcasting ──
             // Skip dialog for vote withdrawals (weight 0) — nothing to adjust
             if (weight !== 0 && this.proxy.askVote && this.proxy.eventEmitter) {
-                // Dedup: if a vote dialog is already pending, return the same promise
                 if (this._pendingVotePromise) return this._pendingVotePromise;
 
                 this._pendingVotePromise = new Promise((resolve, reject) => {
@@ -3901,11 +4970,6 @@ class BroadcastAPI {
                         permlink,
                         weight,
                         defaultVotingPower: this.proxy.defaultVotingPower,
-                        /**
-                         * Call this from the dialog to finalise the vote.
-                         * @param {number} finalWeight - The confirmed weight
-                         * @returns {Promise<object>}
-                         */
                         broadcast: async (finalWeight) => {
                             try {
                                 const result = await _broadcastVote(finalWeight);
@@ -3916,10 +4980,7 @@ class BroadcastAPI {
                                 throw e;
                             }
                         },
-                        /** Call this if the user cancels the dialog. */
-                        cancel: () => {
-                            resolve(null);
-                        }
+                        cancel: () => { resolve(null); }
                     });
                 }).finally(() => {
                     this._pendingVotePromise = null;
@@ -3932,17 +4993,15 @@ class BroadcastAPI {
             return _broadcastVote(weight);
         })();
 
-        // Register in-flight, clear when settled (success or failure)
+        // Register in-flight, clear when settled
         this._inflightVotes.set(voteKey, votePromise);
-        votePromise.finally(() => {
-            this._inflightVotes.delete(voteKey);
-        });
+        votePromise.finally(() => { this._inflightVotes.delete(voteKey); });
 
         return votePromise;
     }
 
     async comment(params) {
-        const { parentAuthor = '', parentPermlink, author, permlink, title = '', body, jsonMetadata = {} } = params;
+        const { parentAuthor = '', parentPermlink = '', author, permlink, title = '', body = '', jsonMetadata = {} } = params;
         const normalizedAuthor = normalizeAccount(author);
         const normalizedParentAuthor = parentAuthor ? normalizeAccount(parentAuthor) : '';
 
@@ -3951,12 +5010,7 @@ class BroadcastAPI {
         }
 
         const key = await this.proxy.keyManager.requestKey(normalizedAuthor, 'posting');
-        const privateKey = PrivateKey.fromString(key);
 
-        // FIX (v4.1): Let the library handle json_metadata stringification.
-        // Pre-stringifying caused a double-stringify mismatch: client signs
-        // '{"app":"..."}' but the library re-stringifies to '"{\\"app\\":\\"...\\"}"',
-        // producing a different transaction hash → "Missing Posting Authority".
         const jsonMetadataValue = typeof jsonMetadata === 'string'
             ? jsonMetadata
             : JSON.stringify(jsonMetadata);
@@ -3971,57 +5025,12 @@ class BroadcastAPI {
             json_metadata: jsonMetadataValue
         };
 
-        const commentOp = [['comment', op]];
 
-        // FIX (v4.1): Use the same direct-broadcast pattern as vote() instead
-        // of going through _send() → broadcast.comment() → sendOperations().
-        // broadcast.comment() internally calls the fork's sendOperations which
-        // has known serialization issues (see _send comment). vote() works
-        // because it broadcasts directly — replicate that pattern here.
-
-        // Offline + queue: defer for later drain
-        if (this.proxy.broadcastQueue && this.proxy.connectivity && !this.proxy.connectivity.isOnline) {
-            return this.proxy.broadcastQueue.enqueue('comment', commentOp, {
-                account: normalizedAuthor,
-                author: normalizedAuthor,
-                permlink,
-                keyType: 'posting',
-            });
-        }
-
-        // Online: try direct broadcast via the convenience method first;
-        // if that fails with a serialization/authority error, retry via
-        // sendOperations (which may use a different serialization path).
-        try {
-            return await this.proxy.client.broadcast.comment(op, privateKey);
-        } catch (e) {
-            const msg = (e.message || '').toLowerCase();
-            if (msg.includes('missing') && msg.includes('authority')) {
-                // Serialization mismatch from broadcast.comment — retry
-                // via sendOperations as a last resort.
-                console.warn('[comment] broadcast.comment failed with authority error, retrying via sendOperations');
-                try {
-                    return await this.proxy.client.broadcast.sendOperations(commentOp, privateKey);
-                } catch (e2) {
-                    // If sendOperations also fails, throw the original error
-                    console.error('[comment] sendOperations also failed:', e2.message);
-                    throw e;
-                }
-            }
-            // Network failure — try to queue if we went offline
-            if (this.proxy.broadcastQueue && this.proxy.connectivity) {
-                const stillOnline = await this.proxy.connectivity.checkNow();
-                if (!stillOnline) {
-                    return this.proxy.broadcastQueue.enqueue('comment', commentOp, {
-                        account: normalizedAuthor,
-                        author: normalizedAuthor,
-                        permlink,
-                        keyType: 'posting',
-                    });
-                }
-            }
-            throw e;
-        }
+        return this._send(
+            [['comment', op]], key,
+            { account: normalizedAuthor, author: normalizedAuthor, permlink, keyType: 'posting' },
+            (privateKey) => this.proxy.client.broadcast.comment(op, privateKey)
+        );
     }
 
     /**
@@ -4996,25 +6005,52 @@ class BroadcastAPI {
     }
 
     /**
-     * Update an existing proposal
+     * Update an existing proposal.
+     *
+     * Hive's update_proposal op requires creator, proposal_id, daily_pay,
+     * subject, permlink, and extensions on every call. You can only LOWER
+     * daily_pay (never raise it). Changing end_date is done through the
+     * extensions variant tag 1 (update_proposal_end_date), not a top-level
+     * field on the op.
+     *
+     * When not changing a field, pass the current value from the existing
+     * proposal so the op round-trips unchanged.
+     *
      * @param {object} params
+     * @param {number|string} params.proposalId - Proposal id (NOT the internal `id`, use `proposal_id`)
+     * @param {string} params.creator          - Proposal creator (must sign with active)
+     * @param {string} [params.dailyPay]       - Formatted asset, e.g. '3.000 PXS'. Omit → '0.000 PXS'
+     * @param {string} [params.subject]        - Proposal subject
+     * @param {string} [params.permlink]       - Creator-owned post permlink
+     * @param {string} [params.endDate]        - ISO date string; travels in extensions
+     * @param {Array}  [params.extensions=[]]  - Additional extensions (merged with end_date variant)
      * @returns {Promise<object>}
      */
     async updateProposal(params) {
         const { proposalId, creator, dailyPay, subject, permlink, endDate, extensions = [] } = params;
         const normalizedCreator = normalizeAccount(creator);
         if (!normalizedCreator) throw new PixaAPIError('Invalid creator', 'INVALID_ACCOUNT');
+        if (proposalId === undefined || proposalId === null) {
+            throw new PixaAPIError('proposalId is required', 'INVALID_PARAMS');
+        }
 
         const key = await this.proxy.keyManager.requestKey(normalizedCreator, 'active');
+
+        // end_date travels in the op's extensions as variant tag 1
+        // (update_proposal_end_date). Never as a top-level op field.
+        const opExtensions = Array.isArray(extensions) ? [...extensions] : [];
+        if (endDate) {
+            opExtensions.push([1, { end_date: endDate }]);
+        }
+
         const op = {
             proposal_id: proposalId,
             creator: normalizedCreator,
-            extensions
+            daily_pay: translateAssetToChain(dailyPay || '0.000 PXS'),
+            subject: subject || '',
+            permlink: permlink || '',
+            extensions: opExtensions
         };
-        if (dailyPay) op.daily_pay = translateAssetToChain(dailyPay);
-        if (subject) op.subject = subject;
-        if (permlink) op.permlink = permlink;
-        if (endDate) op.end_date = endDate;
 
         return this._send(
             [['update_proposal', op]], key,
@@ -5149,6 +6185,81 @@ class BroadcastAPI {
                 decline
             }]], key,
             { account: normalizedAccount, keyType: 'owner' });
+    }
+
+    // ========================================================================
+    // Raw broadcast passthroughs (v4.3.0)
+    // ========================================================================
+    // For pre-signed transactions (e.g. from Hive Keychain, external signers,
+    // or sessionless flows). These bypass key management, _send's cache
+    // invalidation, and the offline queue — the caller is responsible for
+    // signing, for understanding what they're broadcasting, and for retrying
+    // on failure. Use _send (via the op-specific methods above) whenever
+    // possible; fall back to these only when a pre-signed tx is unavoidable.
+    // ========================================================================
+
+    /**
+     * Broadcast a pre-signed transaction
+     * (condenser_api.broadcast_transaction). Returns when the node has
+     * accepted the tx into the mempool, NOT when it has been included in a
+     * block. The returned shape is typically `{}` on success.
+     *
+     * @param {object} tx - Full signed transaction:
+     *   { ref_block_num, ref_block_prefix, expiration, operations,
+     *     extensions, signatures }
+     * @returns {Promise<object>}
+     */
+    async broadcastTransaction(tx) {
+        if (!tx || !Array.isArray(tx.operations) || !Array.isArray(tx.signatures)) {
+            throw new PixaAPIError('broadcastTransaction requires a fully-signed transaction', 'INVALID_TX');
+        }
+        try {
+            return await this.proxy.client.call('condenser_api', 'broadcast_transaction', [tx]);
+        } catch (e) {
+            console.warn('[BroadcastAPI] broadcast_transaction failed:', e.message);
+            throw e;
+        }
+    }
+
+    /**
+     * Broadcast a pre-signed transaction and wait synchronously for it to be
+     * included in a block (condenser_api.broadcast_transaction_synchronous).
+     * Returns { id, block_num, trx_num, expired }.
+     *
+     * @param {object} tx - Full signed transaction
+     * @returns {Promise<{id:string, block_num:number, trx_num:number, expired:boolean}>}
+     */
+    async broadcastTransactionSynchronous(tx) {
+        if (!tx || !Array.isArray(tx.operations) || !Array.isArray(tx.signatures)) {
+            throw new PixaAPIError('broadcastTransactionSynchronous requires a fully-signed transaction', 'INVALID_TX');
+        }
+        try {
+            return await this.proxy.client.call('condenser_api', 'broadcast_transaction_synchronous', [tx]);
+        } catch (e) {
+            console.warn('[BroadcastAPI] broadcast_transaction_synchronous failed:', e.message);
+            throw e;
+        }
+    }
+
+    /**
+     * Broadcast via network_broadcast_api (AppBase namespace). Functionally
+     * equivalent to broadcastTransaction but uses the modern namespace.
+     * Some nodes disable one or the other; this gives callers a choice.
+     * @param {object} tx
+     * @returns {Promise<object>}
+     */
+    async networkBroadcastTransaction(tx) {
+        if (!tx || !Array.isArray(tx.operations) || !Array.isArray(tx.signatures)) {
+            throw new PixaAPIError('networkBroadcastTransaction requires a fully-signed transaction', 'INVALID_TX');
+        }
+        try {
+            return await this.proxy.client.call('network_broadcast_api', 'broadcast_transaction', {
+                trx: tx
+            });
+        } catch (e) {
+            console.warn('[BroadcastAPI] network_broadcast_api.broadcast_transaction failed:', e.message);
+            throw e;
+        }
     }
 }
 
@@ -5451,6 +6562,96 @@ class BlockchainAPI {
         // Return the iterator itself if streams aren't available
         return iterator;
     }
+
+    // ========================================================================
+    // Signature inspection & replay guard (v4.3.0)
+    // ========================================================================
+
+    /**
+     * Return the set of all public keys that could possibly sign for the
+     * given transaction (condenser_api.get_potential_signatures). Useful
+     * for multi-sig UX: show the user which keys MIGHT be asked for.
+     *
+     * @param {object} tx - Unsigned or partially-signed transaction
+     * @returns {Promise<string[]>} Array of public keys
+     */
+    async getPotentialSignatures(tx) {
+        if (!tx || !Array.isArray(tx.operations)) {
+            throw new PixaAPIError('getPotentialSignatures requires a transaction', 'INVALID_TX');
+        }
+        try {
+            return await this.proxy.client.call('condenser_api', 'get_potential_signatures', [tx]);
+        } catch (e) {
+            console.warn('[BlockchainAPI] get_potential_signatures failed:', e.message);
+        }
+        return [];
+    }
+
+    /**
+     * Given a partially-signed transaction plus a set of available public
+     * keys, return the minimal subset that must still sign
+     * (condenser_api.get_required_signatures). Essential for multi-sig
+     * coordination.
+     *
+     * @param {object}   tx
+     * @param {string[]} availableKeys - Public keys the caller can sign with
+     * @returns {Promise<string[]>}
+     */
+    async getRequiredSignatures(tx, availableKeys = []) {
+        if (!tx || !Array.isArray(tx.operations)) {
+            throw new PixaAPIError('getRequiredSignatures requires a transaction', 'INVALID_TX');
+        }
+        try {
+            return await this.proxy.client.call('condenser_api', 'get_required_signatures', [tx, availableKeys]);
+        } catch (e) {
+            console.warn('[BlockchainAPI] get_required_signatures failed:', e.message);
+        }
+        return [];
+    }
+
+    /**
+     * Check whether a transaction id is already known to the node's
+     * mempool / recent history (condenser_api.is_known_transaction).
+     * Returns true if the node has seen this trx id and it is still
+     * within its dedup window. Use for idempotency guards on the offline
+     * broadcast queue — avoids re-broadcasting a tx the node already accepted.
+     *
+     * @param {string} trxId - 40-char hex transaction id
+     * @returns {Promise<boolean>}
+     */
+    async isKnownTransaction(trxId) {
+        if (!trxId || typeof trxId !== 'string') return false;
+        try {
+            const result = await this.proxy.client.call('condenser_api', 'is_known_transaction', [trxId]);
+            return Boolean(result);
+        } catch (e) {
+            console.warn('[BlockchainAPI] is_known_transaction failed:', e.message);
+        }
+        return false;
+    }
+
+    /**
+     * Get transaction details via the modern account_history_api with the
+     * optional `include_reversible` flag. Unlike the existing
+     * getTransaction() (which uses dpixa's database client), this lets the
+     * caller look up a tx that is still in a reversible block.
+     *
+     * @param {string}  trxId
+     * @param {boolean} [includeReversible=false]
+     * @returns {Promise<object|null>}
+     */
+    async getTransactionFromHistory(trxId, includeReversible = false) {
+        if (!trxId) return null;
+        try {
+            return await this.proxy.client.call('account_history_api', 'get_transaction', {
+                id: trxId,
+                include_reversible: Boolean(includeReversible)
+            });
+        } catch (e) {
+            console.warn('[BlockchainAPI] account_history_api.get_transaction failed:', e.message);
+        }
+        return null;
+    }
 }
 
 // ============================================
@@ -5474,6 +6675,54 @@ class ResourceCreditsAPI {
         const normalizedAccounts = accounts.map(acc => normalizeAccount(acc)).filter(acc => acc && acc.length > 0);
         // rc.findRCAccounts(usernames) — documented dpixa method
         return this.proxy.client.rc.findRCAccounts(normalizedAccounts);
+    }
+
+    /**
+     * List RC accounts with pagination (rc_api.list_rc_accounts).
+     * Complements findRcAccounts (which requires exact names).
+     * @param {object} [params]
+     * @param {string} [params.start=''] - Account name to start from
+     * @param {number} [params.limit=100] - Up to 1000
+     * @returns {Promise<object[]>} RC account records
+     */
+    async listRcAccounts({ start = '', limit = 100 } = {}) {
+        try {
+            const result = await this.proxy.client.call('rc_api', 'list_rc_accounts', {
+                start, limit
+            });
+            return result?.rc_accounts || [];
+        } catch (e) {
+            console.warn('[ResourceCreditsAPI] list_rc_accounts failed:', e.message);
+        }
+        return [];
+    }
+
+    /**
+     * List RC delegations directly made from/to an account
+     * (rc_api.list_rc_direct_delegations).
+     * Default order 'by_from_to' expects start = [from, to] tuple.
+     * Pass {from, to} as the tuple's start to page through delegations
+     * originating from `from` starting at delegatee `to`.
+     * @param {object} [params]
+     * @param {[string,string]} [params.start=['','']] - [from, to] tuple
+     * @param {number} [params.limit=100] - Up to 1000
+     * @returns {Promise<object[]>}
+     */
+    async listRcDirectDelegations({ start = ['', ''], limit = 100 } = {}) {
+        try {
+            // Normalize accounts in the start tuple if provided
+            const normalizedStart = Array.isArray(start)
+                ? [start[0] ? normalizeAccount(start[0]) : '', start[1] ? normalizeAccount(start[1]) : '']
+                : start;
+            const result = await this.proxy.client.call('rc_api', 'list_rc_direct_delegations', {
+                start: normalizedStart,
+                limit
+            });
+            return result?.rc_direct_delegations || [];
+        } catch (e) {
+            console.warn('[ResourceCreditsAPI] list_rc_direct_delegations failed:', e.message);
+        }
+        return [];
     }
 
     async getRCMana(account) {
@@ -5619,13 +6868,18 @@ class CommunitiesAPI {
             }
         }
 
-        // pixamind.getRankedPosts({sort, tag, limit}) — documented dpixa method
+        // pixamind.getRankedPosts({sort, tag, limit, start_author, start_permlink})
+        // documented dpixa method. Pagination requires forwarding the start
+        // cursor — without it, every subsequent page re-fetches posts 0-19 and
+        // the Feed's dedupe step silently returns an empty array, making the
+        // grid look stuck after the first page.
         let rawResults = null;
 
         try {
-            rawResults = await this.proxy.client.pixamind.getRankedPosts({
-                sort: dbSort, tag: q.tag || '', limit: q.limit
-            });
+            const bridgeArgs = { sort: dbSort, tag: q.tag || '', limit: q.limit };
+            if (q.start_author) bridgeArgs.start_author = q.start_author;
+            if (q.start_permlink) bridgeArgs.start_permlink = q.start_permlink;
+            rawResults = await this.proxy.client.pixamind.getRankedPosts(bridgeArgs);
         } catch (e) {
             console.warn(`[CommunitiesAPI] getRankedPosts(${dbSort}) failed:`, e.message);
         }
@@ -6297,6 +7551,141 @@ class TransactionStatusAPI {
 }
 
 // ============================================
+// JSON-RPC Meta API Group
+// ============================================
+
+/**
+ * Node capability & method discovery. Unlike the other API groups, these
+ * methods target the node itself — not a specific plugin — and are useful
+ * for detecting which APIs a node exposes before calling them. Results are
+ * cached aggressively (node capabilities rarely change mid-session).
+ */
+class JsonRpcAPI {
+    constructor(proxy) {
+        this.proxy = proxy;
+        this._methods = null;       // Cached method list
+        this._signatures = new Map(); // Cached per-method signatures
+    }
+
+    /**
+     * Return the full list of JSON-RPC methods the node exposes, as an
+     * array of "namespace.method" strings (jsonrpc.get_methods).
+     * Cached for the lifetime of the client.
+     * @param {boolean} [forceRefresh=false]
+     * @returns {Promise<string[]>}
+     */
+    async getMethods(forceRefresh = false) {
+        if (this._methods && !forceRefresh) return this._methods;
+        try {
+            const result = await this.proxy.client.call('jsonrpc', 'get_methods');
+            this._methods = Array.isArray(result) ? result : [];
+        } catch (e) {
+            console.warn('[JsonRpcAPI] get_methods failed:', e.message);
+            this._methods = [];
+        }
+        return this._methods;
+    }
+
+    /**
+     * Return the parameter/return signature for a specific RPC method
+     * (jsonrpc.get_signature). Useful for introspection tooling.
+     * @param {string} method - e.g. "condenser_api.get_dynamic_global_properties"
+     * @returns {Promise<object|null>}
+     */
+    async getSignature(method) {
+        if (!method) return null;
+        if (this._signatures.has(method)) return this._signatures.get(method);
+        try {
+            const result = await this.proxy.client.call('jsonrpc', 'get_signature', { method });
+            this._signatures.set(method, result);
+            return result;
+        } catch (e) {
+            console.warn(`[JsonRpcAPI] get_signature(${method}) failed:`, e.message);
+        }
+        return null;
+    }
+
+    /**
+     * Convenience: does the node expose a given method?
+     * Uses the cached method list (fetching it once if needed).
+     * @param {string} method - e.g. "rc_api.list_rc_direct_delegations"
+     * @returns {Promise<boolean>}
+     */
+    async hasMethod(method) {
+        const methods = await this.getMethods();
+        return methods.includes(method);
+    }
+
+    /**
+     * List which namespaces (API plugins) the node exposes.
+     * Derived from get_methods.
+     * @returns {Promise<string[]>}
+     */
+    async getNamespaces() {
+        const methods = await this.getMethods();
+        const ns = new Set();
+        for (const m of methods) {
+            const dot = m.indexOf('.');
+            if (dot > 0) ns.add(m.slice(0, dot));
+        }
+        return Array.from(ns).sort();
+    }
+
+    /**
+     * Clear the method/signature cache. Call after a node switch.
+     */
+    clearCache() {
+        this._methods = null;
+        this._signatures.clear();
+    }
+}
+
+// ============================================
+// Rewards API Group
+// ============================================
+
+/**
+ * Reward-curve simulation. Currently exposes simulate_curve_payouts, which
+ * is useful for "if you voted now, you would earn ~X" UX previews without
+ * actually casting a vote.
+ */
+class RewardsAPI {
+    constructor(proxy) { this.proxy = proxy; }
+
+    /**
+     * Simulate author/curation payouts under the current reward curve
+     * (rewards_api.simulate_curve_payouts). Pass either a post's
+     * [author, permlink] or a hypothetical rshares value; the node returns
+     * the projected split.
+     *
+     * Note: method availability varies by node. If the node does not expose
+     * rewards_api, this returns null rather than throwing — callers should
+     * treat a null return as "simulation unavailable".
+     *
+     * @param {object} params
+     * @param {string} [params.variableReward] - Hypothetical rshares as a string
+     * @param {Array<{author:string, permlink:string}>} [params.posts] - Specific posts
+     * @returns {Promise<object|null>}
+     */
+    async simulateCurvePayouts({ variableReward, posts } = {}) {
+        const apiParams = {};
+        if (variableReward !== undefined) apiParams.variable_reward = String(variableReward);
+        if (Array.isArray(posts) && posts.length) {
+            apiParams.posts = posts.map(p => ({
+                author: normalizeAccount(p.author),
+                permlink: p.permlink
+            }));
+        }
+        try {
+            return await this.proxy.client.call('rewards_api', 'simulate_curve_payouts', apiParams);
+        } catch (e) {
+            console.warn('[RewardsAPI] simulate_curve_payouts failed:', e.message);
+        }
+        return null;
+    }
+}
+
+// ============================================
 // Internal Managers
 // ============================================
 
@@ -6326,7 +7715,34 @@ class CacheManager {
             const collection = await this.getCollection(collectionName);
             const doc = { data, timestamp: Date.now() };
             await collection.upsert(key, doc);
+
+            // Periodic pruning: check doc count every 10 writes per collection
+            const counter = (this._writeCounters?.get(collectionName) || 0) + 1;
+            if (!this._writeCounters) this._writeCounters = new Map();
+            this._writeCounters.set(collectionName, counter);
+            if (counter % 10 === 0) {
+                this._pruneCollection(collectionName, collection).catch(() => {});
+            }
         } catch (e) {}
+    }
+
+    /**
+     * Prune oldest entries when a cache collection exceeds its max doc limit.
+     * @private
+     */
+    async _pruneCollection(collectionName, collection) {
+        const maxDocs = PixaProxyAPI.COLLECTION_MAX_DOCS[collectionName];
+        if (!maxDocs) return;
+        try {
+            const allDocs = await collection.getAll();
+            if (!allDocs || allDocs.length <= maxDocs) return;
+            allDocs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+            const removeCount = Math.max(1, Math.ceil(allDocs.length * 0.2));
+            const idsToRemove = allDocs.slice(0, removeCount).map(d => d._id || d.id).filter(Boolean);
+            if (idsToRemove.length > 0) {
+                await collection.batchDelete(idsToRemove).catch(() => {});
+            }
+        } catch (_) {}
     }
 
     async invalidateKey(collectionName, key) {
@@ -6636,6 +8052,27 @@ class SanitizationPipeline {
             root_title:    this.sanitizer.safeString(raw.root_title || '', 256),
             root_author:   raw.root_author ? (this.sanitizer.sanitizeUsername(raw.root_author) || '') : '',
             root_permlink: VALIDATORS.safe_permlink(raw.root_permlink) || '',
+
+            // Community & moderation (bridge-enriched fields)
+            //
+            // `category` already holds the community slug for in-community
+            // posts, but we also mirror it under `community` because that's
+            // what the bridge API calls it and what downstream code
+            // (PaperCardMenuOption, Community.js) reads.
+            community:       this.sanitizer.safeString(raw.community || '', 64),
+            community_title: this.sanitizer.safeString(raw.community_title || '', 256),
+            author_role:     VALIDATORS.safe_community_role(raw.author_role),
+            author_title:    this.sanitizer.safeString(raw.author_title || '', 256),
+            stats:           VALIDATORS.safe_stats(raw.stats),
+            is_paidout:      VALIDATORS.safe_bool(raw.is_paidout) ?? false,
+            blacklists:      Array.isArray(raw.blacklists)
+                ? raw.blacklists
+                    .map(b => this.sanitizer.sanitizeUsername(b))
+                    .filter(Boolean)
+                    .slice(0, 32)
+                : [],
+            reblogs:         VALIDATORS.safe_number(raw.reblogs) ?? 0,
+            post_id:         VALIDATORS.safe_number(raw.post_id) ?? 0,
         };
     }
 
@@ -6730,6 +8167,21 @@ class SanitizationPipeline {
             root_title:    this.sanitizer.safeString(raw.root_title || '', 256),
             root_author:   raw.root_author ? (this.sanitizer.sanitizeUsername(raw.root_author) || '') : '',
             root_permlink: VALIDATORS.safe_permlink(raw.root_permlink) || '',
+
+            // Community & moderation (bridge-enriched fields) — replies can
+            // be muted/flagged too, so we preserve the same block as posts.
+            community:       this.sanitizer.safeString(raw.community || '', 64),
+            community_title: this.sanitizer.safeString(raw.community_title || '', 256),
+            author_role:     VALIDATORS.safe_community_role(raw.author_role),
+            author_title:    this.sanitizer.safeString(raw.author_title || '', 256),
+            stats:           VALIDATORS.safe_stats(raw.stats),
+            is_paidout:      VALIDATORS.safe_bool(raw.is_paidout) ?? false,
+            blacklists:      Array.isArray(raw.blacklists)
+                ? raw.blacklists
+                    .map(b => this.sanitizer.sanitizeUsername(b))
+                    .filter(Boolean)
+                    .slice(0, 32)
+                : [],
         };
     }
 
@@ -6787,13 +8239,17 @@ class EntityStoreManager {
      * Returns null if missing or stale (past TTL).
      * @param {'accounts'|'posts'|'comments'} type
      * @param {string} entityId
+     * @param {object} [options]
+     * @param {boolean} [options.allowStale=false] - If true, ignore TTL and return expired data
      * @returns {Promise<object|null>}
      */
-    async get(type, entityId) {
+    async get(type, entityId, { allowStale = false } = {}) {
         try {
             const store = await this._store(type);
             const doc = await store.get(entityId);
             if (!doc) return null;
+
+            if (allowStale) return doc;
 
             const ttl = this.ttl[type] || 60000;
             if (doc._stored_at && (Date.now() - doc._stored_at) < ttl) {
@@ -6866,6 +8322,9 @@ class EntityStoreManager {
                     console.warn(`[EntityStoreManager] batchUpdate fallback(${type}) error:`, e.message)
                 );
             }
+
+            // Fire-and-forget: prune oldest docs if collection exceeds max
+            this._pruneIfNeeded(type, store).catch(() => {});
         } catch (e) {
             console.warn(`[EntityStoreManager] upsertMany(${type}) error, falling back to sequential:`, e.message);
             // Last-resort sequential fallback
@@ -6876,20 +8335,50 @@ class EntityStoreManager {
     }
 
     /**
+     * Prune oldest documents from a store when it exceeds COLLECTION_MAX_DOCS.
+     * Deletes the oldest 20% by _stored_at to avoid pruning on every write.
+     * @private
+     */
+    async _pruneIfNeeded(type, store) {
+        const storeName = `${type}_store`;
+        const maxDocs = PixaProxyAPI.COLLECTION_MAX_DOCS[storeName];
+        if (!maxDocs) return;
+
+        try {
+            const allDocs = await store.getAll();
+            if (!allDocs || allDocs.length <= maxDocs) return;
+
+            // Sort by _stored_at ascending (oldest first)
+            allDocs.sort((a, b) => (a._stored_at || 0) - (b._stored_at || 0));
+
+            // Remove oldest 20% to create headroom
+            const removeCount = Math.max(1, Math.ceil(allDocs.length * 0.2));
+            const idsToRemove = allDocs.slice(0, removeCount).map(d => d._id || d._entity_id).filter(Boolean);
+            if (idsToRemove.length > 0) {
+                await store.batchDelete(idsToRemove).catch(() => {});
+            }
+        } catch (e) {
+            // Non-critical — silently ignore pruning failures
+        }
+    }
+
+    /**
      * Resolve a list of entity IDs from a typed store.
      * Returns entities in the same order as the IDs. Missing/stale entries are null.
      * Uses Promise.all for parallel reads instead of sequential awaits.
      *
      * @param {'accounts'|'posts'|'comments'} type
      * @param {string[]} ids
+     * @param {object} [options]
+     * @param {boolean} [options.allowStale=false] - If true, ignore TTL for offline fallback
      * @returns {Promise<(object|null)[]>}
      */
-    async resolve(type, ids) {
+    async resolve(type, ids, { allowStale = false } = {}) {
         if (ids.length === 0) return [];
-        if (ids.length === 1) return [await this.get(type, ids[0])];
+        if (ids.length === 1) return [await this.get(type, ids[0], { allowStale })];
 
         // Parallel reads — each get() is an independent IDB read transaction
-        return Promise.all(ids.map(id => this.get(type, id)));
+        return Promise.all(ids.map(id => this.get(type, id, { allowStale })));
     }
 
     /**
@@ -6966,19 +8455,23 @@ class QueryCacheManager {
      * Returns null if not cached or stale.
      * @param {string} queryKey
      * @param {string} [ttlCategory] - Key into QUERY_TTL config (e.g. 'trending')
+     * @param {object} [options]
+     * @param {boolean} [options.allowStale=false] - If true, ignore TTL for offline fallback
      * @returns {Promise<{ids: string[], entity_type: string}|null>}
      */
-    async get(queryKey, ttlCategory) {
+    async get(queryKey, ttlCategory, { allowStale = false } = {}) {
         try {
             const col = await this._col();
             const doc = await col.get(queryKey);
             if (!doc) return null;
 
-            const ttl = (ttlCategory && this.ttl[ttlCategory]) || 60000;
-            if (doc.timestamp && (Date.now() - doc.timestamp) < ttl) {
-                return { ids: doc.ids || [], entity_type: doc.entity_type || 'posts' };
+            if (!allowStale) {
+                const ttl = (ttlCategory && this.ttl[ttlCategory]) || 60000;
+                if (doc.timestamp && (Date.now() - doc.timestamp) >= ttl) {
+                    return null;
+                }
             }
-            return null;
+            return { ids: doc.ids || [], entity_type: doc.entity_type || 'posts', stored_at: doc.timestamp };
         } catch (e) {
             return null;
         }
@@ -6995,6 +8488,19 @@ class QueryCacheManager {
             const col = await this._col();
             const doc = { ids, entity_type: entityType, timestamp: Date.now() };
             await col.upsert(queryKey, doc);
+
+            // Periodic pruning: every 20 writes, evict oldest beyond max
+            this._writeCount = (this._writeCount || 0) + 1;
+            if (this._writeCount % 20 === 0) {
+                const maxDocs = PixaProxyAPI.COLLECTION_MAX_DOCS.query_cache || 500;
+                const allDocs = await col.getAll().catch(() => null);
+                if (allDocs && allDocs.length > maxDocs) {
+                    allDocs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                    const removeCount = Math.ceil(allDocs.length * 0.2);
+                    const idsToRemove = allDocs.slice(0, removeCount).map(d => d._id || d.id).filter(Boolean);
+                    if (idsToRemove.length > 0) col.batchDelete(idsToRemove).catch(() => {});
+                }
+            }
         } catch (e) {
             console.warn('[QueryCacheManager] store error:', e.message);
         }
@@ -7041,7 +8547,7 @@ class ContentSanitizer {
 
         /** @type {object} Default sanitize options (v0.2 SanitizeOptions) */
         this.defaultOptions = {
-            internal_domains: ['pixagram.io'],
+            internal_domains: ['pixagram.com'],
             max_body_length: 500000,
             max_image_count: 0,
         };

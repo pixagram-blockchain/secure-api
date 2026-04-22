@@ -18,7 +18,7 @@
  * @module ContentSanitizer
  */
 
-import sanitizeHtmlLib from 'sanitize-html';
+import sanitizeHtmlLib from 'sanitize-html/index';
 import { marked } from 'marked';
 
 // ═══════════════════════════════════════════════════════════
@@ -451,7 +451,7 @@ class MentionProcessor {
 class LinkProcessor {
 
     static #DEFAULT_INTERNAL_DOMAINS = Object.freeze([
-        'pixa.pics', 'pixagram.io', 'hive.blog', 'peakd.com', 'ecency.com',
+        'pixa.pics', 'pixagram.com', 'hive.blog', 'peakd.com', 'ecency.com',
         'hivesigner.com', 'hive-keychain.com', 'splinterlands.com',
         'images.hive.blog', 'files.peakd.com', 'steemitimages.com', 'imgp.steemit.com',
     ]);
@@ -764,7 +764,7 @@ class Summarizer {
 // ═══════════════════════════════════════════════════════════
 
 const DEFAULT_OPTIONS = Object.freeze({
-    internal_domains: ['pixa.pics', 'pixagram.io', 'hive.blog', 'peakd.com', 'ecency.com'],
+    internal_domains: ['pixa.pics', 'pixagram.com', 'hive.blog', 'peakd.com', 'ecency.com'],
     max_body_length:  500_000,
     max_image_count:  0,
 });
@@ -914,4 +914,25 @@ export function summarizeContent(body, sentenceCount) {
     if (!body) return { summary: '', keywords: [], sentences: [], total_sentences: 0 };
     const plain = extractPlainText(body);
     return Summarizer.summarize(plain, sentenceCount || 3);
+}
+
+/**
+ * Last-guard HTML sanitizer for dangerouslySetInnerHTML boundaries.
+ *
+ * Assumes the input is already-rendered HTML (markdown conversion, mention
+ * processing, etc. have already happened).  This function does NOT perform
+ * any markdown rendering — it only strips tags, attributes, and URI schemes
+ * that are not on the post-tier allowlist.
+ *
+ * Use this as the final call before passing a string to dangerouslySetInnerHTML
+ * to ensure defense-in-depth even if upstream sanitization was skipped or
+ * the data was mutated after initial sanitization.
+ *
+ * @param {string} html — Pre-rendered HTML to sanitize
+ * @returns {string} Sanitized HTML safe for innerHTML injection
+ */
+export function safeHTML(html) {
+    if (!html) return '';
+    if (typeof html !== 'string') return '';
+    return sanitizeHtmlLib(html, SanitizeConfigs.post);
 }
